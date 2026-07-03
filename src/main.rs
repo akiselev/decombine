@@ -1,10 +1,116 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use decombine::cli::{Cli, Command, LanguagesCommand, ModelsCommand};
+use decombine::analyze::compare::CompareAnalyzer;
+use decombine::analyze::concerns::ConcernAnalyzer;
+use decombine::analyze::duplicate::{DuplicateAnalyzer, ignore::load_ignored_hashes};
+use decombine::analyze::{AnalysisContext, Analyzer};
+use decombine::cli::{AnalysisCommand, Cli, Command, CompareArgs, LanguagesCommand, ModelsCommand};
 use decombine::config::{CONFIG_TEMPLATE, Config};
+use decombine::db::Db;
 use decombine::index::indexer;
 use decombine::index::language::LanguageRegistry;
+use decombine::report;
+
+fn report_meta(config: &Config, db: &Db, ctx: &AnalysisContext) -> report::ReportMeta {
+    let timestamp: String = db
+        .conn()
+        .query_row("SELECT datetime('now') || 'Z'", [], |row| row.get(0))
+        .unwrap_or_default();
+    report::ReportMeta {
+        identity: ctx.identity.clone(),
+        analysis: config.analysis.clone(),
+        retention: config.index.retention,
+        timestamp,
+        projects: ctx
+            .projects
+            .iter()
+            .map(|p| (p.label.clone(), p.source_dir.clone()))
+            .collect(),
+        ignore_file: config.ignore_file.display().to_string(),
+    }
+}
+
+fn analyze_duplicates(config: &Config, db: &Db) -> Result<()> {
+    let ctx = AnalysisContext::load(db, &[])?;
+    let analyzer = DuplicateAnalyzer {
+        ignored_hashes: load_ignored_hashes(&config.ignore_file)?,
+    };
+    let output = analyzer.run(&ctx, &config.analysis)?;
+    report::clean_report_dir(&config.report_dir)?;
+    report::write_duplicate_report(
+        &config.report_dir,
+        &report_meta(config, db, &ctx),
+        &ctx,
+        &output,
+    )?;
+    println!(
+        "{} clusters ({} ignored), {} cross-directory candidates → {}",
+        output.clusters.len(),
+        output.ignored.len(),
+        output.cross_directory.len(),
+        config.report_dir.display()
+    );
+    Ok(())
+}
+
+fn analyze_concerns(config: &Config, db: &Db) -> Result<()> {
+    if config.analysis.concerns.queries.is_empty() {
+        bail!("no concern queries configured under `analysis.concerns.queries`");
+    }
+    let ctx = AnalysisContext::load(db, &[])?;
+    let mut embedder = decombine::embed::embedder_from_config(config)?;
+    let mut analyzer = ConcernAnalyzer {
+        embedder: embedder.as_mut(),
+    };
+    let output = analyzer.run_mut(&ctx, &config.analysis.concerns)?;
+    report::write_concern_report(
+        &config.report_dir,
+        &report_meta(config, db, &ctx),
+        &ctx,
+        &output,
+    )?;
+    println!(
+        "{} candidate concerns → {}/concerns",
+        output.findings.len(),
+        config.report_dir.display()
+    );
+    Ok(())
+}
+
+fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
+    let comparison = config.comparison.clone().unwrap_or_default();
+    let left = args
+        .left
+        .clone()
+        .or(comparison.left.clone())
+        .context("no `left` project: pass --left or set comparison.left")?;
+    let right = args
+        .right
+        .clone()
+        .or(comparison.right.clone())
+        .context("no `right` project: pass --right or set comparison.right")?;
+    let ctx = AnalysisContext::load(db, &[left.clone(), right.clone()])?;
+    let analyzer = CompareAnalyzer {
+        left_label: left,
+        right_label: right,
+    };
+    let output = analyzer.run(&ctx, &comparison)?;
+    report::write_comparison_report(
+        &config.report_dir,
+        &report_meta(config, db, &ctx),
+        &ctx,
+        &output,
+    )?;
+    println!(
+        "compared `{}` vs `{}`: {} match records → {}/compare",
+        output.left_label,
+        output.right_label,
+        output.matches.len(),
+        config.report_dir.display()
+    );
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -115,6 +221,43 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        command => bail!("`{command:?}` is not implemented yet"),
+        Command::Analyze(args) => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            match args.analysis {
+                None | Some(AnalysisCommand::Duplicates) => analyze_duplicates(&config, &db),
+                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db),
+            }
+        }
+        Command::Compare(args) => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            run_compare(&config, &db, args)
+        }
+        Command::Run(args) => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            let stats = indexer::index(&db, &config, None)?;
+            for project in &stats {
+                println!(
+                    "{}: indexed={} skipped={} units={}",
+                    project.label, project.indexed, project.skipped, project.units
+                );
+            }
+            let mut embedder = decombine::embed::embedder_from_config(&config)?;
+            let embed_stats = decombine::embed::embed_pending(&db, embedder.as_mut(), &config)?;
+            println!("embedded {} new bodies", embed_stats.embedded);
+            drop(embedder);
+            match args.analysis {
+                None | Some(AnalysisCommand::Duplicates) => {
+                    analyze_duplicates(&config, &db)?;
+                    if config.analysis.concerns.enabled {
+                        analyze_concerns(&config, &db)?;
+                    }
+                    Ok(())
+                }
+                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db),
+            }
+        }
     }
 }
