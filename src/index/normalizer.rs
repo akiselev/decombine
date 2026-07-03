@@ -56,6 +56,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(clippy::single_range_in_vec_init)]
     fn strips_and_merges_ranges() {
         let text = "abcdefghij";
         assert_eq!(strip_ranges(text, &[2..4, 3..6, 8..10]), "abgh");

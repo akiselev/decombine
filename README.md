@@ -28,6 +28,30 @@ decombine models download
 decombine doctor
 ```
 
+## Quick start
+
+```sh
+decombine init          # writes decombine.yaml (edit source_dir)
+decombine index         # extract code units into decombine.db
+decombine embed         # downloads the model on first run, then offline
+decombine analyze       # writes decombine-report/index.md + cluster files
+```
+
+Supported languages: Rust, Python, TypeScript, JavaScript, Java, Kotlin,
+C#, Go. Adding a language is mostly declarative: a parser crate plus
+`assets/languages/<id>.toml` and `assets/languages/<id>/units.scm`.
+
+For comparing two codebases (e.g. a rewrite against the original), declare
+labeled `projects` in the config, index and embed both, then run
+`decombine compare --left v1 --right v2`.
+
+More documentation:
+
+- `architecture.md` — design and upstream analysis
+- `PLAN.md` — implementation plan and open decisions
+- `docs/packaging.md` — release builds, model cache, offline use
+- `docs/benchmarks.md` — baseline measurements and default-model notes
+
 ## Development
 
 CI commands (run locally before pushing):

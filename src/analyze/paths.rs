@@ -39,10 +39,8 @@ pub fn byte_ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
 pub fn line_distance(a: (usize, usize), b: (usize, usize)) -> usize {
     if a.1 < b.0 {
         b.0 - a.1
-    } else if b.1 < a.0 {
-        a.0 - b.1
     } else {
-        0
+        a.0.saturating_sub(b.1)
     }
 }
 

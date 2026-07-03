@@ -117,11 +117,11 @@ pub fn existing_model_id(db: &Db, identity: &ModelIdentity) -> Result<ModelId> {
 }
 
 /// Split items into batches bounded by item count and total characters.
-fn batch_by_size<'a>(
-    items: &'a [(String, String)],
+fn batch_by_size(
+    items: &[(String, String)],
     max_items: usize,
     max_chars: usize,
-) -> Vec<&'a [(String, String)]> {
+) -> Vec<&[(String, String)]> {
     let mut batches = Vec::new();
     let mut start = 0;
     let mut chars = 0;

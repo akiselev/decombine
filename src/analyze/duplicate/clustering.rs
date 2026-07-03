@@ -58,8 +58,8 @@ pub fn connected_components(size: usize, edges: &[(usize, usize)]) -> Vec<Vec<us
         in_edges[a] = true;
         in_edges[b] = true;
     }
-    for id in 0..size {
-        if in_edges[id] {
+    for (id, present) in in_edges.iter().enumerate() {
+        if *present {
             groups.entry(uf.find(id)).or_default().push(id);
         }
     }

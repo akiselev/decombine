@@ -94,8 +94,6 @@ pub enum ConfigError {
     EmptyConcernQuery(String),
     #[error("`analysis.concerns.top_units_per_concern` must be between 1 and 1000, got {0}")]
     BadConcernTopUnits(usize),
-    #[error("comparison requires both `left` and `right` project labels")]
-    ComparisonMissingLabel,
     #[error("comparison label {0:?} does not name a configured project")]
     ComparisonUnknownLabel(String),
     #[error("comparison `left` and `right` must differ, both are {0:?}")]
