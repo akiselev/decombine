@@ -202,6 +202,7 @@ def main():
     parser.add_argument("--cache-dir", default=str(Path.home() / ".cache/decombine-bench"))
     args = parser.parse_args()
 
+    args.binary = str(Path(args.binary).resolve())
     cache_dir = Path(args.cache_dir)
     cache_dir.mkdir(parents=True, exist_ok=True)
     results = []
