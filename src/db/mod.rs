@@ -15,6 +15,14 @@ pub struct Db {
     conn: Connection,
 }
 
+/// Where a normalized body hash can be found on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HashLocation {
+    pub source_dir: String,
+    pub relative_path: String,
+    pub language_id: String,
+}
+
 /// Open (or create) the database file and bring the schema up to date.
 pub fn open_or_create(path: &Path) -> Result<Db> {
     if let Some(parent) = path.parent()
@@ -443,6 +451,38 @@ impl Db {
             .query_map([model_id], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// One source location per requested hash, for re-deriving embedding
+    /// text when retention did not store it.
+    pub fn locations_for_hashes(&self, hashes: &[String]) -> Result<Vec<HashLocation>> {
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT p.source_dir, f.relative_path, f.language_id
+             FROM code_units u
+             JOIN files f ON f.id = u.file_id
+             JOIN projects p ON p.id = f.project_id
+             WHERE u.normalized_body_hash = ?1
+             LIMIT 1",
+        )?;
+        let mut locations = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for hash in hashes {
+            let location = stmt
+                .query_row([hash], |row| {
+                    Ok(HashLocation {
+                        source_dir: row.get(0)?,
+                        relative_path: row.get(1)?,
+                        language_id: row.get(2)?,
+                    })
+                })
+                .optional()?;
+            if let Some(location) = location
+                && seen.insert((location.source_dir.clone(), location.relative_path.clone()))
+            {
+                locations.push(location);
+            }
+        }
+        Ok(locations)
     }
 
     /// Remove embeddings whose body hash no longer appears in any code unit.

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use decombine::cli::{Cli, Command, LanguagesCommand};
+use decombine::cli::{Cli, Command, LanguagesCommand, ModelsCommand};
 use decombine::config::{CONFIG_TEMPLATE, Config};
 use decombine::index::indexer;
 use decombine::index::language::LanguageRegistry;
@@ -43,6 +43,45 @@ fn main() -> Result<()> {
             }
             Ok(())
         }
+        Command::Embed => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            let mut embedder = decombine::embed::embedder_from_config(&config)?;
+            let stats = decombine::embed::embed_pending(&db, embedder.as_mut(), &config)?;
+            println!(
+                "embedded {} new bodies in {} batches ({} unresolved)",
+                stats.embedded, stats.batches, stats.unresolved
+            );
+            Ok(())
+        }
+        Command::Models(args) => match args.command {
+            ModelsCommand::List => {
+                for (name, dims, has_quantized) in decombine::config::SUPPORTED_MODELS {
+                    println!(
+                        "{name}: {dims} dims{}",
+                        if *has_quantized {
+                            " (quantized variant available)"
+                        } else {
+                            ""
+                        }
+                    );
+                }
+                Ok(())
+            }
+            ModelsCommand::Download => {
+                let config = Config::load(&cli.config)?;
+                // Constructing the backend downloads the model into cache.
+                let embedder = decombine::embed::embedder_from_config(&config)?;
+                let identity = embedder.identity();
+                println!(
+                    "model {} ready (dims={}, cache={})",
+                    identity.model,
+                    identity.dimensions,
+                    identity.cache_path.as_deref().unwrap_or("default")
+                );
+                Ok(())
+            }
+        },
         Command::Languages(args) => match args.command {
             LanguagesCommand::List => {
                 let config = Config::load(&cli.config).ok();
