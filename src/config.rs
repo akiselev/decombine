@@ -6,14 +6,18 @@ use serde::{Deserialize, Serialize};
 /// Language ids bundled with this binary. Kept in sync with the language
 /// registry assets (Phase 3).
 pub const KNOWN_LANGUAGE_IDS: &[&str] = &[
-    "rust",
-    "python",
-    "typescript",
-    "javascript",
-    "java",
-    "kotlin",
+    "c",
+    "cpp",
     "csharp",
     "go",
+    "java",
+    "javascript",
+    "kotlin",
+    "php",
+    "python",
+    "ruby",
+    "rust",
+    "typescript",
 ];
 
 /// Embedding models supported by the fastembed backend, with their output
@@ -70,6 +74,8 @@ pub enum ConfigError {
     BadMaxBatchChars(usize),
     #[error("`embedding.max_body_chars` must be at least 100, got {0}")]
     BadMaxBodyChars(usize),
+    #[error("`embedding.pending_page_size` must be between 1 and 100000, got {0}")]
+    BadPendingPageSize(usize),
     #[error("threshold `{name}` must be in ({min}, {max}], got {value}")]
     ThresholdRange {
         name: &'static str,
@@ -88,6 +94,14 @@ pub enum ConfigError {
     },
     #[error("`analysis.block_size` must be between 1 and 1000000, got {0}")]
     BadBlockSize(usize),
+    #[error(
+        "`analysis.min_semantic_body_node_count` must be at least `body_node_count_threshold`, got {semantic} < {indexed}"
+    )]
+    BadSemanticBodyNodeCount { semantic: usize, indexed: usize },
+    #[error("`analysis.max_edges_per_unit` must be between 1 and 1000, got {0}")]
+    BadMaxEdgesPerUnit(usize),
+    #[error("`analysis.max_cluster_size` must be between 2 and 100000, got {0}")]
+    BadMaxClusterSize(usize),
     #[error("concern query name {0:?} is empty or duplicated")]
     BadConcernName(String),
     #[error("concern query {0:?} has empty query text")]
@@ -176,6 +190,8 @@ pub struct EmbeddingConfig {
     pub max_batch_chars: usize,
     #[serde(default = "default_max_body_chars")]
     pub max_body_chars: usize,
+    #[serde(default = "default_pending_page_size")]
+    pub pending_page_size: usize,
     #[serde(default = "default_true")]
     pub normalize: bool,
     #[serde(default = "default_execution_provider")]
@@ -250,6 +266,12 @@ pub struct AnalysisConfig {
     pub block_size: usize,
     #[serde(default = "default_body_node_count_threshold")]
     pub body_node_count_threshold: usize,
+    #[serde(default = "default_min_semantic_body_node_count")]
+    pub min_semantic_body_node_count: usize,
+    #[serde(default = "default_max_edges_per_unit")]
+    pub max_edges_per_unit: usize,
+    #[serde(default = "default_max_cluster_size")]
+    pub max_cluster_size: usize,
     #[serde(default)]
     pub concerns: ConcernsConfig,
 }
@@ -318,7 +340,7 @@ fn default_report_dir() -> PathBuf {
     PathBuf::from("decombine-report")
 }
 fn default_ignore_file() -> PathBuf {
-    PathBuf::from("decombine.ignore.txt")
+    PathBuf::from(".decombineignore")
 }
 fn default_enabled_languages() -> Vec<String> {
     KNOWN_LANGUAGE_IDS.iter().map(|s| s.to_string()).collect()
@@ -337,6 +359,9 @@ fn default_max_batch_chars() -> usize {
 }
 fn default_max_body_chars() -> usize {
     10_000
+}
+fn default_pending_page_size() -> usize {
+    512
 }
 fn default_execution_provider() -> String {
     "cpu".to_string()
@@ -361,6 +386,15 @@ fn default_block_size() -> usize {
 }
 fn default_body_node_count_threshold() -> usize {
     10
+}
+fn default_min_semantic_body_node_count() -> usize {
+    20
+}
+fn default_max_edges_per_unit() -> usize {
+    5
+}
+fn default_max_cluster_size() -> usize {
+    100
 }
 fn default_min_projection() -> f64 {
     0.45
@@ -541,6 +575,9 @@ impl Config {
         if e.max_body_chars < 100 {
             return Err(ConfigError::BadMaxBodyChars(e.max_body_chars));
         }
+        if e.pending_page_size == 0 || e.pending_page_size > 100_000 {
+            return Err(ConfigError::BadPendingPageSize(e.pending_page_size));
+        }
         Ok(())
     }
 
@@ -561,6 +598,18 @@ impl Config {
         }
         if a.block_size == 0 || a.block_size > 1_000_000 {
             return Err(ConfigError::BadBlockSize(a.block_size));
+        }
+        if a.min_semantic_body_node_count < a.body_node_count_threshold {
+            return Err(ConfigError::BadSemanticBodyNodeCount {
+                semantic: a.min_semantic_body_node_count,
+                indexed: a.body_node_count_threshold,
+            });
+        }
+        if a.max_edges_per_unit == 0 || a.max_edges_per_unit > 1000 {
+            return Err(ConfigError::BadMaxEdgesPerUnit(a.max_edges_per_unit));
+        }
+        if a.max_cluster_size < 2 || a.max_cluster_size > 100_000 {
+            return Err(ConfigError::BadMaxClusterSize(a.max_cluster_size));
         }
         Ok(())
     }
@@ -641,7 +690,7 @@ source_dir: .
 source_dir_exclude: []
 db_file: decombine.db
 report_dir: decombine-report
-ignore_file: decombine.ignore.txt
+ignore_file: .decombineignore
 
 # Optional multi-project form. If present, remove `source_dir` above.
 # projects:
@@ -651,15 +700,16 @@ ignore_file: decombine.ignore.txt
 #     source_dir: .
 
 languages:
-  enabled: ["rust", "python", "typescript", "javascript", "java", "kotlin", "csharp", "go"]
+  enabled: ["c", "cpp", "csharp", "go", "java", "javascript", "kotlin", "php", "python", "ruby", "rust", "typescript"]
 
 embedding:
   backend: fastembed
   model: BGESmallENV15
-  # cache_dir: ~/.cache/decombine/models
+  # cache_dir: /absolute/path/to/decombine/models
   batch_size: 256
   max_batch_chars: 200000
   max_body_chars: 10000
+  pending_page_size: 512
   normalize: true
   execution_provider: cpu
   quantized: false
@@ -673,6 +723,9 @@ analysis:
   rerank_threshold: 0.94
   block_size: 1000
   body_node_count_threshold: 10
+  min_semantic_body_node_count: 20
+  max_edges_per_unit: 5
+  max_cluster_size: 100
   concerns:
     enabled: false
     min_projection: 0.45

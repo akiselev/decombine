@@ -309,6 +309,17 @@ impl Db {
             .query_row("SELECT COUNT(*) FROM code_units", [], |row| row.get(0))?)
     }
 
+    pub fn count_units_for_project(&self, project_id: ProjectId) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*)
+             FROM code_units u
+             JOIN files f ON f.id = u.file_id
+             WHERE f.project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )?)
+    }
+
     // ----- embedding models -----
 
     /// Find the model row matching this identity, or insert one.
@@ -449,6 +460,46 @@ impl Db {
         )?;
         let rows = stmt
             .query_map([model_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    pub fn count_unembedded_hashes(&self, model_id: ModelId) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COUNT(*) FROM (
+               SELECT u.normalized_body_hash
+               FROM code_units u
+               LEFT JOIN embeddings e
+                 ON e.normalized_body_hash = u.normalized_body_hash AND e.model_id = ?1
+               WHERE e.normalized_body_hash IS NULL
+               GROUP BY u.normalized_body_hash
+             )",
+            [model_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn unembedded_hashes_page(
+        &self,
+        model_id: ModelId,
+        after_hash: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.normalized_body_hash, MAX(u.embedding_text)
+             FROM code_units u
+             LEFT JOIN embeddings e
+               ON e.normalized_body_hash = u.normalized_body_hash AND e.model_id = ?1
+             WHERE e.normalized_body_hash IS NULL
+               AND (?2 IS NULL OR u.normalized_body_hash > ?2)
+             GROUP BY u.normalized_body_hash
+             ORDER BY u.normalized_body_hash
+             LIMIT ?3",
+        )?;
+        let rows = stmt
+            .query_map(params![model_id, after_hash, limit as i64], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

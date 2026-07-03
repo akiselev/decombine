@@ -17,7 +17,10 @@ pub struct ProjectStats {
     pub skipped: usize,
     pub removed: usize,
     pub failed: usize,
+    /// Units extracted from files indexed during this run.
     pub units: usize,
+    /// Total indexed units for this project after this run.
+    pub total_units: usize,
 }
 
 /// Index every configured project (or just `only_label`), incrementally.
@@ -154,6 +157,7 @@ fn index_project(
             stats.removed += 1;
         }
     }
+    stats.total_units = db.count_units_for_project(project_id)? as usize;
     Ok(stats)
 }
 

@@ -1,0 +1,3 @@
+method merge scope=Demo.Store lines=3-12 nodes=27 hash=87042d12d51b
+method collect_names scope=Demo lines=15-27 nodes=36 hash=b89c53a3075b
+closure <anonymous> scope=Demo lines=16-23 nodes=18 hash=37355fbc8e11

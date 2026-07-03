@@ -4,7 +4,7 @@
 use decombine::config::Config;
 use decombine::db::{Db, open_or_create};
 use decombine::embed::hash::HashEmbedder;
-use decombine::embed::{Embedder, embed_pending};
+use decombine::embed::{Embedder, embed_pending, embed_pending_with_progress};
 use decombine::index::indexer;
 
 const FN_A: &str = "fn alpha(values: Vec<i64>) -> i64 {\n    let mut total = 0;\n    for value in values {\n        if value > 0 {\n            total += value;\n        }\n    }\n    total\n}\n";
@@ -85,6 +85,34 @@ fn resume_skips_already_embedded_hashes() {
             .embedded,
         1
     );
+}
+
+#[test]
+fn embedding_pages_pending_hashes_and_reports_progress() {
+    let mut f = fixture("full");
+    f.config.embedding.pending_page_size = 1;
+    write(&f, "one.rs", FN_A);
+    write(&f, "two.rs", FN_B);
+    write(
+        &f,
+        "three.rs",
+        "fn gamma(values: Vec<i64>) -> i64 {\n    let mut total = 1;\n    for value in values {\n        if value > 1 {\n            total *= value;\n        }\n    }\n    total\n}\n",
+    );
+    indexer::index(&f.db, &f.config, None).unwrap();
+
+    let mut progress = Vec::new();
+    let mut embedder = HashEmbedder::new(16);
+    let stats = embed_pending_with_progress(&f.db, &mut embedder, &f.config, |event| {
+        progress.push(event);
+    })
+    .unwrap();
+
+    assert_eq!(stats.pending_total, 3);
+    assert_eq!(stats.embedded, 3);
+    assert_eq!(stats.batches, 3);
+    assert_eq!(progress.len(), 3);
+    assert_eq!(progress[0].pending_total, 3);
+    assert_eq!(progress.last().unwrap().embedded, 3);
 }
 
 #[test]

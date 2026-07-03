@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use anyhow::{Context, Result, bail};
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
@@ -40,16 +42,15 @@ impl FastembedBackend {
         let dimensions = info.dim;
         let model_code = info.model_code.clone();
 
-        let mut options = TextInitOptions::new(model_name).with_show_download_progress(true);
-        let cache_path = match &config.cache_dir {
-            Some(dir) => {
-                options = options.with_cache_dir(dir.clone());
-                Some(dir.to_string_lossy().into_owned())
-            }
-            None => std::env::var("FASTEMBED_CACHE_DIR")
-                .ok()
-                .or(Some(".fastembed_cache".to_string())),
+        let cache_dir = match &config.cache_dir {
+            Some(dir) => dir.clone(),
+            None => std::env::var_os("FASTEMBED_CACHE_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(default_cache_dir),
         };
+        let options = TextInitOptions::new(model_name)
+            .with_show_download_progress(true)
+            .with_cache_dir(cache_dir.clone());
         let model = TextEmbedding::try_new(options)
             .with_context(|| format!("loading fastembed model {}", config.model))?;
 
@@ -66,12 +67,25 @@ impl FastembedBackend {
                 normalize: config.normalize,
                 execution_provider: config.execution_provider.clone(),
                 quantization: config.quantized.then(|| "quantized".to_string()),
-                cache_path,
+                cache_path: Some(cache_dir.to_string_lossy().into_owned()),
             },
             model,
             batch_size: config.batch_size,
         })
     }
+}
+
+fn default_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
+        return PathBuf::from(dir).join("decombine").join("models");
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        return PathBuf::from(home)
+            .join(".cache")
+            .join("decombine")
+            .join("models");
+    }
+    PathBuf::from(".decombine-models")
 }
 
 impl Embedder for FastembedBackend {

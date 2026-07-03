@@ -1,0 +1,3 @@
+method merge scope=Store lines=7-17 nodes=47 hash=1ab26a6890c8
+function collectNames scope=- lines=20-37 nodes=89 hash=4fcc87ad5df1
+closure <anonymous> scope=- lines=22-28 nodes=37 hash=56af2ad5f27b

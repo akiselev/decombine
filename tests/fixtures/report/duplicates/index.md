@@ -24,5 +24,4 @@ Clusters whose members span distant paths or multiple top-level modules. Scope e
 
 ## Ignoring reviewed clusters
 
-Append a cluster hash to `decombine.ignore.txt` to suppress it. It reappears if the code or its location changes.
-
+Append a cluster hash to `.decombineignore` to suppress it. It reappears if the code or its location changes.

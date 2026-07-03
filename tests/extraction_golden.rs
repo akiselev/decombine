@@ -69,5 +69,5 @@ fn extraction_matches_golden_snapshots() {
         assert_eq!(actual, expected, "snapshot mismatch for {}", path.display());
         checked += 1;
     }
-    assert_eq!(checked, 8, "expected one fixture per bundled language");
+    assert_eq!(checked, 12, "expected one fixture per bundled language");
 }

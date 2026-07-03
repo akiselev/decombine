@@ -1,0 +1,2 @@
+function count_positive scope=- lines=8-16 nodes=32 hash=c60eec6637d6
+function normalize_scores scope=- lines=18-26 nodes=49 hash=26287f1560eb

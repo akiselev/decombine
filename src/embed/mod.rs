@@ -40,6 +40,8 @@ pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmbedStats {
+    /// Distinct body hashes pending at the start of this run.
+    pub pending_total: usize,
     /// Distinct body hashes embedded in this run.
     pub embedded: usize,
     /// Pending hashes whose text could not be recovered (stale files in
@@ -48,9 +50,27 @@ pub struct EmbedStats {
     pub batches: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedProgress {
+    pub pending_total: usize,
+    pub embedded: usize,
+    pub unresolved: usize,
+    pub batches: usize,
+    pub current_batch: usize,
+}
+
 /// Embed every distinct un-embedded body hash with this embedder, enforcing
 /// model-identity immutability and resuming where a prior run stopped.
 pub fn embed_pending(db: &Db, embedder: &mut dyn Embedder, config: &Config) -> Result<EmbedStats> {
+    embed_pending_with_progress(db, embedder, config, |_| {})
+}
+
+pub fn embed_pending_with_progress(
+    db: &Db,
+    embedder: &mut dyn Embedder,
+    config: &Config,
+    mut progress: impl FnMut(EmbedProgress),
+) -> Result<EmbedStats> {
     let identity = embedder.identity().clone();
     db.check_or_set_immutable("embedding.backend", &identity.backend)?;
     db.check_or_set_immutable("embedding.model", &identity.model)?;
@@ -58,55 +78,78 @@ pub fn embed_pending(db: &Db, embedder: &mut dyn Embedder, config: &Config) -> R
     db.check_or_set_immutable("embedding.normalize", &identity.normalize.to_string())?;
     let model_id = db.find_or_create_model(&identity)?;
 
-    let pending = db.unembedded_hashes(model_id)?;
-    let mut resolved: Vec<(String, String)> = Vec::with_capacity(pending.len());
-    let mut missing: Vec<String> = Vec::new();
-    for (hash, text) in pending {
-        match text {
-            Some(text) => resolved.push((hash, text)),
-            None => missing.push(hash),
+    let pending_total = db.count_unembedded_hashes(model_id)? as usize;
+    let mut stats = EmbedStats {
+        pending_total,
+        ..EmbedStats::default()
+    };
+    let mut after_hash: Option<String> = None;
+    loop {
+        let pending = db.unembedded_hashes_page(
+            model_id,
+            after_hash.as_deref(),
+            config.embedding.pending_page_size,
+        )?;
+        if pending.is_empty() {
+            break;
         }
-    }
-    let mut stats = EmbedStats::default();
-    if !missing.is_empty() {
-        let recovered = recover_texts_from_source(db, config, &missing)?;
-        for hash in missing {
-            match recovered.get(&hash) {
-                Some(text) => resolved.push((hash, text.clone())),
-                None => stats.unresolved += 1,
-            }
-        }
-    }
-    resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        after_hash = pending.last().map(|(hash, _)| hash.clone());
 
-    for batch in batch_by_size(
-        &resolved,
-        config.embedding.batch_size,
-        config.embedding.max_batch_chars,
-    ) {
-        let texts: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
-        let vectors = embedder.embed(&texts)?;
-        anyhow::ensure!(
-            vectors.len() == batch.len(),
-            "embedder returned {} vectors for {} inputs",
-            vectors.len(),
-            batch.len()
-        );
-        for ((hash, _), mut vector) in batch.iter().zip(vectors) {
-            anyhow::ensure!(
-                vector.len() == identity.dimensions,
-                "model {} returned {} dimensions, expected {}",
-                identity.model,
-                vector.len(),
-                identity.dimensions
-            );
-            if identity.normalize {
-                normalize_in_place(&mut vector);
+        let mut resolved: Vec<(String, String)> = Vec::with_capacity(pending.len());
+        let mut missing: Vec<String> = Vec::new();
+        for (hash, text) in pending {
+            match text {
+                Some(text) => resolved.push((hash, text)),
+                None => missing.push(hash),
             }
-            db.insert_embedding(model_id, hash, &vector)?;
-            stats.embedded += 1;
         }
-        stats.batches += 1;
+        if !missing.is_empty() {
+            let recovered = recover_texts_from_source(db, config, &missing)?;
+            for hash in missing {
+                match recovered.get(&hash) {
+                    Some(text) => resolved.push((hash, text.clone())),
+                    None => stats.unresolved += 1,
+                }
+            }
+        }
+        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+
+        for batch in batch_by_size(
+            &resolved,
+            config.embedding.batch_size,
+            config.embedding.max_batch_chars,
+        ) {
+            let texts: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
+            let vectors = embedder.embed(&texts)?;
+            anyhow::ensure!(
+                vectors.len() == batch.len(),
+                "embedder returned {} vectors for {} inputs",
+                vectors.len(),
+                batch.len()
+            );
+            for ((hash, _), mut vector) in batch.iter().zip(vectors) {
+                anyhow::ensure!(
+                    vector.len() == identity.dimensions,
+                    "model {} returned {} dimensions, expected {}",
+                    identity.model,
+                    vector.len(),
+                    identity.dimensions
+                );
+                if identity.normalize {
+                    normalize_in_place(&mut vector);
+                }
+                db.insert_embedding(model_id, hash, &vector)?;
+                stats.embedded += 1;
+            }
+            stats.batches += 1;
+            progress(EmbedProgress {
+                pending_total: stats.pending_total,
+                embedded: stats.embedded,
+                unresolved: stats.unresolved,
+                batches: stats.batches,
+                current_batch: batch.len(),
+            });
+        }
     }
     Ok(stats)
 }

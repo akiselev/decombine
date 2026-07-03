@@ -71,11 +71,15 @@ fn reindex_unchanged_tree_skips_files() {
     let stats = indexer::index(&f.db, &f.config, None).unwrap();
     assert_eq!(stats[0].indexed, 2);
     assert_eq!(stats[0].skipped, 0);
+    assert_eq!(stats[0].units, 2);
+    assert_eq!(stats[0].total_units, 2);
 
     let stats = indexer::index(&f.db, &f.config, None).unwrap();
     assert_eq!(stats[0].indexed, 0);
     assert_eq!(stats[0].skipped, 2);
     assert_eq!(stats[0].removed, 0);
+    assert_eq!(stats[0].units, 0);
+    assert_eq!(stats[0].total_units, 2);
 }
 
 #[test]

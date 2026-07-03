@@ -158,6 +158,8 @@ macro_rules! bundled {
 
 fn bundled_languages() -> Vec<(&'static str, &'static str, &'static str, Language)> {
     vec![
+        bundled!("c", tree_sitter_c::LANGUAGE),
+        bundled!("cpp", tree_sitter_cpp::LANGUAGE),
         bundled!("rust", tree_sitter_rust::LANGUAGE),
         bundled!("python", tree_sitter_python::LANGUAGE),
         bundled!("javascript", tree_sitter_javascript::LANGUAGE),
@@ -166,6 +168,8 @@ fn bundled_languages() -> Vec<(&'static str, &'static str, &'static str, Languag
         bundled!("kotlin", tree_sitter_kotlin_ng::LANGUAGE),
         bundled!("csharp", tree_sitter_c_sharp::LANGUAGE),
         bundled!("go", tree_sitter_go::LANGUAGE),
+        bundled!("php", tree_sitter_php::LANGUAGE_PHP),
+        bundled!("ruby", tree_sitter_ruby::LANGUAGE),
     ]
 }
 
@@ -237,12 +241,16 @@ mod tests {
         assert_eq!(
             ids,
             vec![
+                "c",
+                "cpp",
                 "csharp",
                 "go",
                 "java",
                 "javascript",
                 "kotlin",
+                "php",
                 "python",
+                "ruby",
                 "rust",
                 "typescript"
             ]
@@ -265,6 +273,10 @@ mod tests {
     fn extension_resolution() {
         let registry = LanguageRegistry::global();
         assert_eq!(registry.by_extension("rs").unwrap().spec.id, "rust");
+        assert_eq!(registry.by_extension("c").unwrap().spec.id, "c");
+        assert_eq!(registry.by_extension("cpp").unwrap().spec.id, "cpp");
+        assert_eq!(registry.by_extension("php").unwrap().spec.id, "php");
+        assert_eq!(registry.by_extension("rb").unwrap().spec.id, "ruby");
         assert_eq!(registry.by_extension("tsx").unwrap().spec.id, "typescript");
         assert_eq!(registry.by_extension("mjs").unwrap().spec.id, "javascript");
         assert!(registry.by_extension("txt").is_none());

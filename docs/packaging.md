@@ -40,7 +40,8 @@ explicitly with `decombine models download`) into, in order of precedence:
 
 1. `embedding.cache_dir` from `decombine.yaml`
 2. `$FASTEMBED_CACHE_DIR`
-3. `.fastembed_cache` in the working directory
+3. the OS cache directory (`$XDG_CACHE_HOME/decombine/models`, or
+   `~/.cache/decombine/models` on Unix-like systems)
 
 No API keys or accounts are needed; models come from public Hugging Face
 repositories. After the first download, indexing, embedding, and analysis

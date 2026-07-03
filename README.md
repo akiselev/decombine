@@ -37,8 +37,8 @@ decombine embed         # downloads the model on first run, then offline
 decombine analyze       # writes decombine-report/index.md + cluster files
 ```
 
-Supported languages: Rust, Python, TypeScript, JavaScript, Java, Kotlin,
-C#, Go. Adding a language is mostly declarative: a parser crate plus
+Supported languages: C, C++, C#, Go, Java, JavaScript, Kotlin, PHP, Python,
+Ruby, Rust, TypeScript. Adding a language is mostly declarative: a parser crate plus
 `assets/languages/<id>.toml` and `assets/languages/<id>/units.scm`.
 
 For comparing two codebases (e.g. a rewrite against the original), declare

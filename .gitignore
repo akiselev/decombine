@@ -1,6 +1,11 @@
 _upstream/
 *:Zone.Identifier
 /target
+/decombine.db
+/decombine-report/
+/runs/
+/.fastembed_cache/
+/.decombine-models/
 
 
 # Added by cargo

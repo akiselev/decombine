@@ -130,7 +130,7 @@ source_dir:
 source_dir_exclude: []
 db_file: decombine.db
 report_dir: decombine-report
-ignore_file: decombine.ignore.txt
+ignore_file: .decombineignore
 
 # Optional multi-project form. If present, this replaces source_dir.
 projects:
@@ -149,7 +149,9 @@ embedding:
   model: BGESmallENV15
   cache_dir:
   batch_size: 256
+  max_batch_chars: 200000
   max_body_chars: 10000
+  pending_page_size: 512
   normalize: true
   execution_provider: cpu
   quantized: false
@@ -163,6 +165,9 @@ analysis:
   rerank_threshold: 0.94
   block_size: 1000
   body_node_count_threshold: 10
+  min_semantic_body_node_count: 20
+  max_edges_per_unit: 5
+  max_cluster_size: 100
   concerns:
     enabled: false
     min_projection: 0.45
@@ -277,7 +282,7 @@ Persist `ModelIdentity` with at least:
 - pooling/normalization mode
 - execution provider, such as CPU, CUDA, CoreML, DirectML, or OpenVINO
 - quantization mode
-- effective cache path and whether `HF_HOME`, `FASTEMBED_CACHE_DIR`, or config selected it
+- effective cache path and whether `embedding.cache_dir`, `FASTEMBED_CACHE_DIR`, or the OS cache default selected it
 
 Default model choice is still an open product decision. General text embedding models are easy to run locally; code-focused models may produce better duplicate-detection quality. Because `fastembed` already supports some code-oriented models, the first milestone should stay on `fastembed` and benchmark before adding custom ONNX plumbing.
 

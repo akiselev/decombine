@@ -86,6 +86,13 @@ impl Analyzer for DuplicateAnalyzer {
             {
                 continue;
             }
+            let exact_copy = a.normalized_body_hash == b.normalized_body_hash;
+            if !exact_copy
+                && (a.body_node_count < config.min_semantic_body_node_count
+                    || b.body_node_count < config.min_semantic_body_node_count)
+            {
+                continue;
+            }
             let boosted = rerank::boosted_score(pair.score, a, b);
             let keep = pair.score >= config.similarity_threshold as f32
                 || boosted >= config.rerank_threshold as f32;
@@ -98,10 +105,11 @@ impl Analyzer for DuplicateAnalyzer {
                 });
             }
         }
+        let surviving = limit_edges_per_unit(ctx, surviving, config.max_edges_per_unit);
 
-        // 3. Union-find connected components.
-        let edges: Vec<(usize, usize)> = surviving.iter().map(|p| (p.a, p.b)).collect();
-        let components = clustering::connected_components(ctx.units.len(), &edges);
+        // 3. Union-find connected components, bounded so one bridge-heavy
+        // component cannot become an unreviewable report page.
+        let components = bounded_components(ctx.units.len(), &surviving, config.max_cluster_size);
 
         // 4. Build clusters with exact-copy folding and stable hashes.
         let mut clusters: Vec<Cluster> = components
@@ -187,4 +195,98 @@ fn build_cluster(ctx: &AnalysisContext, members: Vec<usize>, pairs: &[RankedPair
         hash,
         exact_groups,
     }
+}
+
+fn limit_edges_per_unit(
+    ctx: &AnalysisContext,
+    mut pairs: Vec<RankedPair>,
+    max_edges_per_unit: usize,
+) -> Vec<RankedPair> {
+    pairs.sort_by(|x, y| {
+        y.boosted
+            .total_cmp(&x.boosted)
+            .then(x.a.cmp(&y.a))
+            .then(x.b.cmp(&y.b))
+    });
+    let mut counts = vec![0_usize; ctx.units.len()];
+    let mut kept = Vec::new();
+    for pair in pairs {
+        let exact_copy =
+            ctx.units[pair.a].normalized_body_hash == ctx.units[pair.b].normalized_body_hash;
+        if exact_copy
+            || (counts[pair.a] < max_edges_per_unit && counts[pair.b] < max_edges_per_unit)
+        {
+            counts[pair.a] += 1;
+            counts[pair.b] += 1;
+            kept.push(pair);
+        }
+    }
+    kept
+}
+
+fn bounded_components(
+    size: usize,
+    pairs: &[RankedPair],
+    max_cluster_size: usize,
+) -> Vec<Vec<usize>> {
+    let mut ordered = pairs.to_vec();
+    ordered.sort_by(|x, y| {
+        y.boosted
+            .total_cmp(&x.boosted)
+            .then(x.a.cmp(&y.a))
+            .then(x.b.cmp(&y.b))
+    });
+    let mut parent: Vec<usize> = (0..size).collect();
+    let mut rank = vec![0_u8; size];
+    let mut component_size = vec![1_usize; size];
+    let mut present = vec![false; size];
+
+    for pair in ordered {
+        present[pair.a] = true;
+        present[pair.b] = true;
+        let root_a = find(&mut parent, pair.a);
+        let root_b = find(&mut parent, pair.b);
+        if root_a == root_b {
+            continue;
+        }
+        if component_size[root_a] + component_size[root_b] > max_cluster_size {
+            continue;
+        }
+        let (new_root, old_root) = match rank[root_a].cmp(&rank[root_b]) {
+            std::cmp::Ordering::Less => (root_b, root_a),
+            std::cmp::Ordering::Greater => (root_a, root_b),
+            std::cmp::Ordering::Equal => {
+                rank[root_a] += 1;
+                (root_a, root_b)
+            }
+        };
+        parent[old_root] = new_root;
+        component_size[new_root] += component_size[old_root];
+    }
+
+    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for (id, is_present) in present.iter().copied().enumerate() {
+        if is_present {
+            let root = find(&mut parent, id);
+            groups.entry(root).or_default().push(id);
+        }
+    }
+    let mut components: Vec<Vec<usize>> = groups.into_values().collect();
+    components.retain(|members| members.len() > 1);
+    components.sort_by_key(|c| c[0]);
+    components
+}
+
+fn find(parent: &mut [usize], x: usize) -> usize {
+    let mut root = x;
+    while parent[root] != root {
+        root = parent[root];
+    }
+    let mut current = x;
+    while parent[current] != root {
+        let next = parent[current];
+        parent[current] = root;
+        current = next;
+    }
+    root
 }

@@ -94,7 +94,7 @@ fn meta(ctx: &AnalysisContext, retention: RetentionMode) -> report::ReportMeta {
             .iter()
             .map(|p| (p.label.clone(), p.source_dir.clone()))
             .collect(),
-        ignore_file: "decombine.ignore.txt".into(),
+        ignore_file: ".decombineignore".into(),
     }
 }
 

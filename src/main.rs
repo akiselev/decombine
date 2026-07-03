@@ -12,6 +12,10 @@ use decombine::index::indexer;
 use decombine::index::language::LanguageRegistry;
 use decombine::report;
 
+fn project_scope(ctx: &AnalysisContext) -> Vec<String> {
+    ctx.projects.iter().map(|p| p.label.clone()).collect()
+}
+
 fn report_meta(config: &Config, db: &Db, ctx: &AnalysisContext) -> report::ReportMeta {
     let timestamp: String = db
         .conn()
@@ -44,6 +48,12 @@ fn analyze_duplicates(config: &Config, db: &Db) -> Result<()> {
         &ctx,
         &output,
     )?;
+    db.create_analysis_run(
+        "duplicates",
+        ctx.model_id,
+        &project_scope(&ctx),
+        &serde_json::to_string(&config.analysis)?,
+    )?;
     println!(
         "{} clusters ({} ignored), {} cross-directory candidates → {}",
         output.clusters.len(),
@@ -69,6 +79,12 @@ fn analyze_concerns(config: &Config, db: &Db) -> Result<()> {
         &report_meta(config, db, &ctx),
         &ctx,
         &output,
+    )?;
+    db.create_analysis_run(
+        "concerns",
+        ctx.model_id,
+        &project_scope(&ctx),
+        &serde_json::to_string(&config.analysis.concerns)?,
     )?;
     println!(
         "{} candidate concerns → {}/concerns",
@@ -101,6 +117,12 @@ fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
         &report_meta(config, db, &ctx),
         &ctx,
         &output,
+    )?;
+    db.create_analysis_run(
+        "compare",
+        ctx.model_id,
+        &project_scope(&ctx),
+        &serde_json::to_string(&comparison)?,
     )?;
     println!(
         "compared `{}` vs `{}`: {} match records → {}/compare",
@@ -138,13 +160,14 @@ fn main() -> Result<()> {
             let stats = indexer::index(&db, &config, args.project.as_deref())?;
             for project in &stats {
                 println!(
-                    "{}: indexed={} skipped={} removed={} failed={} units={}",
+                    "{}: indexed={} skipped={} removed={} failed={} units_indexed={} units_total={}",
                     project.label,
                     project.indexed,
                     project.skipped,
                     project.removed,
                     project.failed,
-                    project.units
+                    project.units,
+                    project.total_units
                 );
             }
             Ok(())
@@ -153,7 +176,21 @@ fn main() -> Result<()> {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
             let mut embedder = decombine::embed::embedder_from_config(&config)?;
-            let stats = decombine::embed::embed_pending(&db, embedder.as_mut(), &config)?;
+            let stats = decombine::embed::embed_pending_with_progress(
+                &db,
+                embedder.as_mut(),
+                &config,
+                |progress| {
+                    eprintln!(
+                        "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
+                        progress.embedded + progress.unresolved,
+                        progress.pending_total,
+                        progress.batches,
+                        progress.current_batch,
+                        progress.unresolved
+                    );
+                },
+            )?;
             println!(
                 "embedded {} new bodies in {} batches ({} unresolved)",
                 stats.embedded, stats.batches, stats.unresolved
@@ -240,13 +277,36 @@ fn main() -> Result<()> {
             let stats = indexer::index(&db, &config, None)?;
             for project in &stats {
                 println!(
-                    "{}: indexed={} skipped={} units={}",
-                    project.label, project.indexed, project.skipped, project.units
+                    "{}: indexed={} skipped={} removed={} failed={} units_indexed={} units_total={}",
+                    project.label,
+                    project.indexed,
+                    project.skipped,
+                    project.removed,
+                    project.failed,
+                    project.units,
+                    project.total_units
                 );
             }
             let mut embedder = decombine::embed::embedder_from_config(&config)?;
-            let embed_stats = decombine::embed::embed_pending(&db, embedder.as_mut(), &config)?;
-            println!("embedded {} new bodies", embed_stats.embedded);
+            let embed_stats = decombine::embed::embed_pending_with_progress(
+                &db,
+                embedder.as_mut(),
+                &config,
+                |progress| {
+                    eprintln!(
+                        "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
+                        progress.embedded + progress.unresolved,
+                        progress.pending_total,
+                        progress.batches,
+                        progress.current_batch,
+                        progress.unresolved
+                    );
+                },
+            )?;
+            println!(
+                "embedded {} new bodies in {} batches ({} unresolved)",
+                embed_stats.embedded, embed_stats.batches, embed_stats.unresolved
+            );
             drop(embedder);
             match args.analysis {
                 None | Some(AnalysisCommand::Duplicates) => {

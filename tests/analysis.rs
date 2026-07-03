@@ -209,6 +209,30 @@ fn ignore_file_hashes_suppress_clusters() {
 }
 
 #[test]
+fn low_complexity_semantic_pairs_are_filtered_but_exact_copies_remain() {
+    let v1 = normalize(vec![1.0, 0.0, 0.0, 0.0]);
+    let v2 = normalize(vec![1.0, 0.02, 0.0, 0.0]);
+    let mut small_a = unit("main", "a.rs", "a", None, "ha", 10);
+    let mut small_b = unit("main", "b.rs", "b", None, "hb", 10);
+    small_a.body_node_count = 10;
+    small_b.body_node_count = 10;
+    let report = run_duplicates(&ctx(
+        vec![small_a.clone(), small_b.clone()],
+        vec![Some(v1.clone()), Some(v2.clone())],
+        &["main"],
+    ));
+    assert!(report.clusters.is_empty());
+
+    small_b.normalized_body_hash = small_a.normalized_body_hash.clone();
+    let report = run_duplicates(&ctx(
+        vec![small_a, small_b],
+        vec![Some(v1.clone()), Some(v1)],
+        &["main"],
+    ));
+    assert_eq!(report.clusters.len(), 1);
+}
+
+#[test]
 fn cross_directory_candidates_span_and_suppression() {
     let dup = normalize(vec![1.0, 0.02, 0.0, 0.0]);
     let local = normalize(vec![0.0, 0.0, 1.0, 0.02]);

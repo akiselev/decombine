@@ -181,7 +181,7 @@ pub fn write_duplicate_report(
     let _ = writeln!(
         index,
         "Append a cluster hash to `{}` to suppress it. It reappears if the \
-         code or its location changes.\n",
+         code or its location changes.",
         meta.ignore_file
     );
     if !report.ignored.is_empty() {
