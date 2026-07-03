@@ -233,6 +233,16 @@ impl Db {
         Ok(self.conn.last_insert_rowid())
     }
 
+    /// Refresh mtime/size without touching the file's code units. Used when
+    /// a file was touched but its content hash is unchanged.
+    pub fn update_file_meta(&self, file_id: FileId, mtime_ns: i64, size: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE files SET mtime_ns = ?1, size = ?2 WHERE id = ?3",
+            params![mtime_ns, size, file_id],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_file(&self, file_id: FileId) -> Result<()> {
         self.conn
             .execute("DELETE FROM files WHERE id = ?1", [file_id])?;

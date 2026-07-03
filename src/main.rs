@@ -1,8 +1,10 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use decombine::cli::{Cli, Command};
+use decombine::cli::{Cli, Command, LanguagesCommand};
 use decombine::config::{CONFIG_TEMPLATE, Config};
+use decombine::index::indexer;
+use decombine::index::language::LanguageRegistry;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -24,6 +26,38 @@ fn main() -> Result<()> {
             print!("{}", serde_yaml::to_string(&config)?);
             Ok(())
         }
+        Command::Index(args) => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            let stats = indexer::index(&db, &config, args.project.as_deref())?;
+            for project in &stats {
+                println!(
+                    "{}: indexed={} skipped={} removed={} failed={} units={}",
+                    project.label,
+                    project.indexed,
+                    project.skipped,
+                    project.removed,
+                    project.failed,
+                    project.units
+                );
+            }
+            Ok(())
+        }
+        Command::Languages(args) => match args.command {
+            LanguagesCommand::List => {
+                let config = Config::load(&cli.config).ok();
+                let enabled = config.map(|c| c.languages.enabled);
+                for id in LanguageRegistry::global().ids() {
+                    let state = match &enabled {
+                        Some(list) if list.iter().any(|e| e == id) => "enabled",
+                        Some(_) => "disabled",
+                        None => "available",
+                    };
+                    println!("{id}: {state}");
+                }
+                Ok(())
+            }
+        },
         Command::Doctor => {
             let config = Config::load(&cli.config)?;
             println!("config: ok ({})", cli.config.display());
