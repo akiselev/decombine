@@ -1,0 +1,3 @@
+function add_batch scope=Counter lines=9-19 nodes=28 hash=6e55bd7bac34
+function summarize scope=- lines=22-37 nodes=87 hash=d66de1e53743
+closure <anonymous> scope=- lines=30-34 nodes=13 hash=7cf9016f28e1

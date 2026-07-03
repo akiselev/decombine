@@ -1,12 +1,8 @@
-mod cli;
-mod config;
-mod db;
-
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 
-use crate::cli::{Cli, Command};
-use crate::config::{CONFIG_TEMPLATE, Config};
+use decombine::cli::{Cli, Command};
+use decombine::config::{CONFIG_TEMPLATE, Config};
 
 fn main() -> Result<()> {
     let cli = Cli::parse();

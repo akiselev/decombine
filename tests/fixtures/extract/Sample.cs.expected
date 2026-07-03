@@ -1,0 +1,3 @@
+constructor Ledger scope=Ledger lines=7-14 nodes=24 hash=ecf138b52392
+method Transfer scope=Ledger lines=16-29 nodes=74 hash=30bf2e86741e
+function Withdraw scope=Ledger lines=18-24 nodes=38 hash=412ffad53076
