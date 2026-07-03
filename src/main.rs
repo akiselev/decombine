@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod db;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
