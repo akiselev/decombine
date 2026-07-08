@@ -26,6 +26,11 @@ pub const SUPPORTED_MODELS: &[(&str, usize, bool)] = &[
     ("BGESmallENV15", 384, true),
     ("BGEBaseENV15", 768, true),
     ("JinaEmbeddingsV2BaseCode", 768, false),
+    ("AllMiniLML6V2", 384, true),
+    ("GTEBaseENV15", 768, true),
+    ("SnowflakeArcticEmbedM", 768, true),
+    ("SnowflakeArcticEmbedMLong", 768, true),
+    ("NomicEmbedTextV15", 768, true),
 ];
 
 pub const EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "coreml", "directml", "openvino"];
@@ -72,6 +77,10 @@ pub enum ConfigError {
     BadBatchSize(usize),
     #[error("`embedding.max_batch_chars` must be at least 1000, got {0}")]
     BadMaxBatchChars(usize),
+    #[error(
+        "`embedding.max_batch_token_area` must be at least 65536 (one 256-token item), got {0}"
+    )]
+    BadMaxBatchTokenArea(usize),
     #[error("`embedding.max_body_chars` must be at least 100, got {0}")]
     BadMaxBodyChars(usize),
     #[error("`embedding.pending_page_size` must be between 1 and 100000, got {0}")]
@@ -102,6 +111,8 @@ pub enum ConfigError {
     BadMaxEdgesPerUnit(usize),
     #[error("`analysis.max_cluster_size` must be between 2 and 100000, got {0}")]
     BadMaxClusterSize(usize),
+    #[error("`analysis.max_semantic_cluster_size` must be between 2 and 100000, got {0}")]
+    BadMaxSemanticClusterSize(usize),
     #[error("concern query name {0:?} is empty or duplicated")]
     BadConcernName(String),
     #[error("concern query {0:?} has empty query text")]
@@ -122,6 +133,26 @@ pub enum ConfigError {
     },
     #[error("`comparison.top_k_per_unit` must be between 1 and 100, got {0}")]
     BadComparisonTopK(usize),
+    #[error("`comparison.min_body_node_count` must be at most 100000, got {0}")]
+    BadComparisonMinBodyNodeCount(usize),
+    #[error("`comparison.max_right_candidate_fanout` must be at most 100000, got {0}")]
+    BadComparisonMaxRightCandidateFanout(usize),
+    #[error("`comparison.calibration` must be `none` or `background`, got {0:?}")]
+    BadComparisonCalibration(String),
+    #[error("`embedding.custom.pooling` must be `mean` or `cls`, got {0:?}")]
+    BadCustomPooling(String),
+    #[error("`embedding.custom.dimensions` must be between 1 and 8192, got {0}")]
+    BadCustomDimensions(usize),
+    #[error("`embedding.custom.max_length` must be between 16 and 32768, got {0}")]
+    BadCustomMaxLength(usize),
+    #[error(
+        "`embedding.quantized` is not supported for custom models; bake quantization into the ONNX file instead"
+    )]
+    CustomQuantizedUnsupported,
+    #[error("`comparison.calibration_sample_pairs` must be between 16 and 1000000, got {0}")]
+    BadComparisonCalibrationSamplePairs(usize),
+    #[error("`comparison.abtt_directions` must be at most 64, got {0}")]
+    BadComparisonAbttDirections(usize),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -188,6 +219,12 @@ pub struct EmbeddingConfig {
     pub batch_size: usize,
     #[serde(default = "default_max_batch_chars")]
     pub max_batch_chars: usize,
+    /// Cap on a batch's padded token area (`items * longest_item_tokens^2`),
+    /// the term ONNX attention memory scales with. The default keeps embed
+    /// peak RSS around 8 GB regardless of model context length; raise it on
+    /// machines with more memory for larger (slightly faster) batches.
+    #[serde(default = "default_max_batch_token_area")]
+    pub max_batch_token_area: usize,
     #[serde(default = "default_max_body_chars")]
     pub max_body_chars: usize,
     #[serde(default = "default_pending_page_size")]
@@ -198,6 +235,33 @@ pub struct EmbeddingConfig {
     pub execution_provider: String,
     #[serde(default)]
     pub quantized: bool,
+    /// When set, `model` is a free-form label and the embedding model is
+    /// loaded from local ONNX + tokenizer files instead of fastembed's
+    /// built-in catalog.
+    #[serde(default)]
+    pub custom: Option<CustomModelConfig>,
+}
+
+/// A locally exported ONNX embedding model (e.g. an `optimum` export of a
+/// Hugging Face model that fastembed does not bundle). The directory must
+/// contain `tokenizer.json`, `config.json`, `special_tokens_map.json`, and
+/// `tokenizer_config.json` alongside the ONNX file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CustomModelConfig {
+    /// Directory holding the exported model files.
+    pub dir: PathBuf,
+    /// ONNX graph, relative to `dir`.
+    #[serde(default = "default_custom_onnx_file")]
+    pub onnx_file: PathBuf,
+    /// Output embedding dimensions (recorded in the model identity).
+    pub dimensions: usize,
+    /// `mean` or `cls`.
+    #[serde(default = "default_custom_pooling")]
+    pub pooling: String,
+    /// Tokenizer truncation length.
+    #[serde(default = "default_custom_max_length")]
+    pub max_length: usize,
 }
 
 impl Default for EmbeddingConfig {
@@ -209,6 +273,9 @@ impl Default for EmbeddingConfig {
 impl EmbeddingConfig {
     /// Output dimensions of the configured model.
     pub fn dimensions(&self) -> usize {
+        if let Some(custom) = &self.custom {
+            return custom.dimensions;
+        }
         SUPPORTED_MODELS
             .iter()
             .find(|(name, _, _)| *name == self.model)
@@ -272,6 +339,11 @@ pub struct AnalysisConfig {
     pub max_edges_per_unit: usize,
     #[serde(default = "default_max_cluster_size")]
     pub max_cluster_size: usize,
+    /// Distinct normalized bodies allowed per cluster. Bounds transitive
+    /// chaining (family A ~ bridge ~ family B) without limiting how many
+    /// exact copies of one body a cluster may hold.
+    #[serde(default = "default_max_semantic_cluster_size")]
+    pub max_semantic_cluster_size: usize,
     #[serde(default)]
     pub concerns: ConcernsConfig,
 }
@@ -321,10 +393,30 @@ pub struct ComparisonConfig {
     pub match_threshold: f64,
     #[serde(default = "default_top_k_per_unit")]
     pub top_k_per_unit: usize,
+    #[serde(default)]
+    pub min_body_node_count: usize,
+    #[serde(default)]
+    pub max_right_candidate_fanout: usize,
     #[serde(default = "default_true")]
     pub use_name_hints: bool,
     #[serde(default = "default_true")]
     pub use_path_hints: bool,
+    /// `none` keeps `candidate_threshold`/`match_threshold` as raw cosine
+    /// cutoffs. `background` reinterprets them as positions between the
+    /// corpus background similarity (0.0) and the top-1 score anchor (1.0),
+    /// so the same config ports across embedding models with different
+    /// cosine scales.
+    #[serde(default = "default_calibration")]
+    pub calibration: String,
+    /// Random cross-project pairs sampled to estimate background similarity.
+    #[serde(default = "default_calibration_sample_pairs")]
+    pub calibration_sample_pairs: usize,
+    /// All-but-the-top preprocessing: remove the corpus mean plus this many
+    /// top principal directions from every vector and renormalize before
+    /// semantic matching. `0` disables. Removes model anisotropy so scores
+    /// spread over the full cosine range and port better across models.
+    #[serde(default)]
+    pub abtt_directions: usize,
 }
 
 impl Default for ComparisonConfig {
@@ -356,6 +448,9 @@ fn default_batch_size() -> usize {
 }
 fn default_max_batch_chars() -> usize {
     200_000
+}
+fn default_max_batch_token_area() -> usize {
+    32_000_000
 }
 fn default_max_body_chars() -> usize {
     10_000
@@ -396,11 +491,29 @@ fn default_max_edges_per_unit() -> usize {
 fn default_max_cluster_size() -> usize {
     100
 }
+fn default_max_semantic_cluster_size() -> usize {
+    16
+}
 fn default_min_projection() -> f64 {
     0.45
 }
 fn default_top_units_per_concern() -> usize {
     50
+}
+fn default_custom_onnx_file() -> PathBuf {
+    PathBuf::from("onnx/model.onnx")
+}
+fn default_custom_pooling() -> String {
+    "mean".to_string()
+}
+fn default_custom_max_length() -> usize {
+    512
+}
+fn default_calibration() -> String {
+    "none".to_string()
+}
+fn default_calibration_sample_pairs() -> usize {
+    4096
 }
 fn default_comparison_candidate_threshold() -> f64 {
     0.78
@@ -546,19 +659,34 @@ impl Config {
         if e.backend != "fastembed" {
             return Err(ConfigError::UnknownBackend(e.backend.clone()));
         }
-        let Some((_, _, has_quantized)) = SUPPORTED_MODELS
-            .iter()
-            .find(|(name, _, _)| *name == e.model)
-        else {
-            let supported = SUPPORTED_MODELS
+        if let Some(custom) = &e.custom {
+            if !matches!(custom.pooling.as_str(), "mean" | "cls") {
+                return Err(ConfigError::BadCustomPooling(custom.pooling.clone()));
+            }
+            if !(1..=8192).contains(&custom.dimensions) {
+                return Err(ConfigError::BadCustomDimensions(custom.dimensions));
+            }
+            if !(16..=32_768).contains(&custom.max_length) {
+                return Err(ConfigError::BadCustomMaxLength(custom.max_length));
+            }
+            if e.quantized {
+                return Err(ConfigError::CustomQuantizedUnsupported);
+            }
+        } else {
+            let Some((_, _, has_quantized)) = SUPPORTED_MODELS
                 .iter()
-                .map(|(name, _, _)| *name)
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ConfigError::UnknownModel(e.model.clone(), supported));
-        };
-        if e.quantized && !has_quantized {
-            return Err(ConfigError::NoQuantizedVariant(e.model.clone()));
+                .find(|(name, _, _)| *name == e.model)
+            else {
+                let supported = SUPPORTED_MODELS
+                    .iter()
+                    .map(|(name, _, _)| *name)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Err(ConfigError::UnknownModel(e.model.clone(), supported));
+            };
+            if e.quantized && !has_quantized {
+                return Err(ConfigError::NoQuantizedVariant(e.model.clone()));
+            }
         }
         if !EXECUTION_PROVIDERS.contains(&e.execution_provider.as_str()) {
             return Err(ConfigError::UnknownExecutionProvider(
@@ -574,6 +702,9 @@ impl Config {
         }
         if e.max_body_chars < 100 {
             return Err(ConfigError::BadMaxBodyChars(e.max_body_chars));
+        }
+        if e.max_batch_token_area < 65_536 {
+            return Err(ConfigError::BadMaxBatchTokenArea(e.max_batch_token_area));
         }
         if e.pending_page_size == 0 || e.pending_page_size > 100_000 {
             return Err(ConfigError::BadPendingPageSize(e.pending_page_size));
@@ -611,6 +742,11 @@ impl Config {
         if a.max_cluster_size < 2 || a.max_cluster_size > 100_000 {
             return Err(ConfigError::BadMaxClusterSize(a.max_cluster_size));
         }
+        if a.max_semantic_cluster_size < 2 || a.max_semantic_cluster_size > 100_000 {
+            return Err(ConfigError::BadMaxSemanticClusterSize(
+                a.max_semantic_cluster_size,
+            ));
+        }
         Ok(())
     }
 
@@ -646,6 +782,27 @@ impl Config {
         }
         if c.top_k_per_unit == 0 || c.top_k_per_unit > 100 {
             return Err(ConfigError::BadComparisonTopK(c.top_k_per_unit));
+        }
+        if c.min_body_node_count > 100_000 {
+            return Err(ConfigError::BadComparisonMinBodyNodeCount(
+                c.min_body_node_count,
+            ));
+        }
+        if c.max_right_candidate_fanout > 100_000 {
+            return Err(ConfigError::BadComparisonMaxRightCandidateFanout(
+                c.max_right_candidate_fanout,
+            ));
+        }
+        if !matches!(c.calibration.as_str(), "none" | "background") {
+            return Err(ConfigError::BadComparisonCalibration(c.calibration.clone()));
+        }
+        if !(16..=1_000_000).contains(&c.calibration_sample_pairs) {
+            return Err(ConfigError::BadComparisonCalibrationSamplePairs(
+                c.calibration_sample_pairs,
+            ));
+        }
+        if c.abtt_directions > 64 {
+            return Err(ConfigError::BadComparisonAbttDirections(c.abtt_directions));
         }
         // Labels are optional in the file (they can come from the command
         // line), but when set they must name distinct configured projects.
@@ -708,6 +865,8 @@ embedding:
   # cache_dir: /absolute/path/to/decombine/models
   batch_size: 256
   max_batch_chars: 200000
+  # Padded token area cap (items x longest_tokens^2); bounds embed peak RSS.
+  max_batch_token_area: 32000000
   max_body_chars: 10000
   pending_page_size: 512
   normalize: true
@@ -726,6 +885,8 @@ analysis:
   min_semantic_body_node_count: 20
   max_edges_per_unit: 5
   max_cluster_size: 100
+  # Distinct bodies per cluster; stops transitive chaining across families.
+  max_semantic_cluster_size: 16
   concerns:
     enabled: false
     min_projection: 0.45
@@ -741,6 +902,8 @@ analysis:
 #   candidate_threshold: 0.78
 #   match_threshold: 0.86
 #   top_k_per_unit: 5
+#   min_body_node_count: 0
+#   max_right_candidate_fanout: 0 # 0 disables semantic-magnet suppression
 #   use_name_hints: true
 #   use_path_hints: true
 "#;

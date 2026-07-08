@@ -34,6 +34,27 @@ pub struct ExactGroup {
     pub members: Vec<usize>,
 }
 
+/// Where a cluster's members live, for report sectioning: product findings
+/// outrank product↔test matches (a recurring false-positive shape: an
+/// implementation matched to its own test), which outrank test/docs-only
+/// boilerplate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ClusterKind {
+    Product,
+    Mixed,
+    TestOrDocs,
+}
+
+impl ClusterKind {
+    pub fn title(self) -> &'static str {
+        match self {
+            ClusterKind::Product => "Product code clusters",
+            ClusterKind::Mixed => "Product ↔ test/docs clusters",
+            ClusterKind::TestOrDocs => "Test and docs clusters",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cluster {
     /// Unit indices, sorted.
@@ -46,6 +67,7 @@ pub struct Cluster {
     pub top_boosted: f32,
     /// Exact-copy folding: one entry per distinct body hash.
     pub exact_groups: Vec<ExactGroup>,
+    pub kind: ClusterKind,
 }
 
 #[derive(Debug, Default)]
@@ -107,9 +129,16 @@ impl Analyzer for DuplicateAnalyzer {
         }
         let surviving = limit_edges_per_unit(ctx, surviving, config.max_edges_per_unit);
 
-        // 3. Union-find connected components, bounded so one bridge-heavy
-        // component cannot become an unreviewable report page.
-        let components = bounded_components(ctx.units.len(), &surviving, config.max_cluster_size);
+        // 3. Union-find connected components, bounded two ways: unit count
+        // caps page size, and distinct-body count stops transitive chaining
+        // from gluing unrelated near-duplicate families together (exact
+        // copies merge freely — many copies of one body are one finding).
+        let components = bounded_components(
+            ctx,
+            &surviving,
+            config.max_cluster_size,
+            config.max_semantic_cluster_size,
+        );
 
         // 4. Build clusters with exact-copy folding and stable hashes.
         let mut clusters: Vec<Cluster> = components
@@ -117,8 +146,9 @@ impl Analyzer for DuplicateAnalyzer {
             .map(|members| build_cluster(ctx, members, &surviving))
             .collect();
         clusters.sort_by(|x, y| {
-            y.top_boosted
-                .total_cmp(&x.top_boosted)
+            x.kind
+                .cmp(&y.kind)
+                .then(y.top_boosted.total_cmp(&x.top_boosted))
                 .then(x.hash.cmp(&y.hash))
         });
 
@@ -187,6 +217,18 @@ fn build_cluster(ctx: &AnalysisContext, members: Vec<usize>, pairs: &[RankedPair
         })
         .collect();
 
+    let test_members = members
+        .iter()
+        .filter(|&&i| is_test_or_docs_unit(&ctx.units[i]))
+        .count();
+    let kind = if test_members == 0 {
+        ClusterKind::Product
+    } else if test_members == members.len() {
+        ClusterKind::TestOrDocs
+    } else {
+        ClusterKind::Mixed
+    };
+
     Cluster {
         top_raw: cluster_pairs.iter().map(|p| p.raw).fold(0.0, f32::max),
         top_boosted: cluster_pairs.iter().map(|p| p.boosted).fold(0.0, f32::max),
@@ -194,7 +236,22 @@ fn build_cluster(ctx: &AnalysisContext, members: Vec<usize>, pairs: &[RankedPair
         pairs: cluster_pairs,
         hash,
         exact_groups,
+        kind,
     }
+}
+
+/// Test/docs by path, or by living in an inline `tests`/`test` module
+/// (Rust's `#[cfg(test)] mod tests` shows up as a scope, not a path).
+fn is_test_or_docs_unit(unit: &crate::analyze::context::CodeUnitRef) -> bool {
+    if crate::analyze::paths::is_test_or_docs_path(&unit.relative_path) {
+        return true;
+    }
+    matches!(
+        unit.scope
+            .as_deref()
+            .and_then(|scope| scope.split('.').next()),
+        Some("tests") | Some("test")
+    )
 }
 
 fn limit_edges_per_unit(
@@ -225,10 +282,12 @@ fn limit_edges_per_unit(
 }
 
 fn bounded_components(
-    size: usize,
+    ctx: &AnalysisContext,
     pairs: &[RankedPair],
     max_cluster_size: usize,
+    max_semantic_cluster_size: usize,
 ) -> Vec<Vec<usize>> {
+    let size = ctx.units.len();
     let mut ordered = pairs.to_vec();
     ordered.sort_by(|x, y| {
         y.boosted
@@ -239,6 +298,14 @@ fn bounded_components(
     let mut parent: Vec<usize> = (0..size).collect();
     let mut rank = vec![0_u8; size];
     let mut component_size = vec![1_usize; size];
+    // Distinct normalized bodies per component root. Edges are processed
+    // best-first, so when a merge would exceed the semantic bound the
+    // stronger core is already together and the weaker bridge is dropped.
+    let mut bodies: Vec<HashSet<&str>> = ctx
+        .units
+        .iter()
+        .map(|u| HashSet::from([u.normalized_body_hash.as_str()]))
+        .collect();
     let mut present = vec![false; size];
 
     for pair in ordered {
@@ -252,6 +319,13 @@ fn bounded_components(
         if component_size[root_a] + component_size[root_b] > max_cluster_size {
             continue;
         }
+        let merged_bodies = bodies[root_a].union(&bodies[root_b]).count();
+        // Exact-copy growth (no new distinct body on either side) is always
+        // allowed; semantic variety is what the bound limits.
+        let adds_variety = merged_bodies > bodies[root_a].len().max(bodies[root_b].len());
+        if adds_variety && merged_bodies > max_semantic_cluster_size {
+            continue;
+        }
         let (new_root, old_root) = match rank[root_a].cmp(&rank[root_b]) {
             std::cmp::Ordering::Less => (root_b, root_a),
             std::cmp::Ordering::Greater => (root_a, root_b),
@@ -262,6 +336,8 @@ fn bounded_components(
         };
         parent[old_root] = new_root;
         component_size[new_root] += component_size[old_root];
+        let moved = std::mem::take(&mut bodies[old_root]);
+        bodies[new_root].extend(moved);
     }
 
     let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();

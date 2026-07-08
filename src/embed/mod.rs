@@ -18,6 +18,11 @@ pub trait Embedder {
     fn dimensions(&self) -> usize {
         self.identity().dimensions
     }
+    /// Tokens per input the model actually attends to (inputs are truncated
+    /// beyond this). Bounds the padded-cost estimate in batch packing.
+    fn max_sequence_length(&self) -> usize {
+        512
+    }
     fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -112,12 +117,18 @@ pub fn embed_pending_with_progress(
                 }
             }
         }
-        resolved.sort_by(|a, b| a.0.cmp(&b.0));
+        // Pack length-sorted items so every batch's padded token area
+        // (count x longest-item-tokens^2, the term ONNX attention memory
+        // scales with) stays under budget. Hash order only matters for the
+        // page cursor above, not within a page.
+        resolved.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
 
-        for batch in batch_by_size(
+        for batch in pack_batches(
             &resolved,
             config.embedding.batch_size,
             config.embedding.max_batch_chars,
+            config.embedding.max_batch_token_area,
+            embedder.max_sequence_length(),
         ) {
             let texts: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
             let vectors = embedder.embed(&texts)?;
@@ -159,24 +170,45 @@ pub fn existing_model_id(db: &Db, identity: &ModelIdentity) -> Result<ModelId> {
     db.find_or_create_model(identity)
 }
 
-/// Split items into batches bounded by item count and total characters.
-fn batch_by_size(
+/// Rough tokens for a code body: ~4 chars/token, clamped to what the model
+/// will actually attend to after truncation.
+fn estimated_tokens(text: &str, max_sequence_length: usize) -> usize {
+    (text.chars().count() / 4 + 1).min(max_sequence_length.max(1))
+}
+
+/// Split items into batches bounded by item count, total characters, and
+/// padded token area. ONNX runtime pads every input to the longest in the
+/// batch and materializes attention over it, so peak memory scales with
+/// `count * longest_tokens^2`; that product is what `max_token_area` caps.
+/// Items must be sorted longest-first so the running maximum is the first
+/// item and long bodies batch together instead of inflating short ones.
+fn pack_batches(
     items: &[(String, String)],
     max_items: usize,
     max_chars: usize,
+    max_token_area: usize,
+    max_sequence_length: usize,
 ) -> Vec<&[(String, String)]> {
     let mut batches = Vec::new();
     let mut start = 0;
     let mut chars = 0;
+    let mut longest_tokens = 0;
     for (index, (_, text)) in items.iter().enumerate() {
         let len = text.chars().count();
-        let at_capacity = index > start && (index - start >= max_items || chars + len > max_chars);
+        let tokens = estimated_tokens(text, max_sequence_length);
+        let longest = longest_tokens.max(tokens);
+        let at_capacity = index > start
+            && (index - start >= max_items
+                || chars + len > max_chars
+                || (index - start + 1) * longest * longest > max_token_area);
         if at_capacity {
             batches.push(&items[start..index]);
             start = index;
             chars = 0;
+            longest_tokens = 0;
         }
         chars += len;
+        longest_tokens = longest_tokens.max(tokens);
     }
     if start < items.len() {
         batches.push(&items[start..]);
@@ -248,17 +280,41 @@ mod tests {
     #[test]
     fn batches_respect_item_and_char_limits() {
         let items = pairs(&[10, 10, 10, 10, 10]);
-        let by_count = batch_by_size(&items, 2, 1000);
+        let by_count = pack_batches(&items, 2, 1000, usize::MAX, 512);
         assert_eq!(by_count.len(), 3);
         assert_eq!(by_count[0].len(), 2);
         assert_eq!(by_count[2].len(), 1);
 
-        let by_chars = batch_by_size(&items, 100, 25);
+        let by_chars = pack_batches(&items, 100, 25, usize::MAX, 512);
         assert_eq!(by_chars.len(), 3, "10+10 fits, third overflows 25");
 
         // A single oversized item still forms its own batch.
         let big = pairs(&[500]);
-        assert_eq!(batch_by_size(&big, 10, 25).len(), 1);
+        assert_eq!(pack_batches(&big, 10, 25, usize::MAX, 512).len(), 1);
+    }
+
+    #[test]
+    fn batches_respect_token_area_budget() {
+        // 2000 chars ~ 501 tokens, clamped to 500 -> area 250_000 per item.
+        // Budget 1_000_000 fits four such items per batch.
+        let items = pairs(&[2000, 2000, 2000, 2000, 2000, 2000]);
+        let batches = pack_batches(&items, 100, usize::MAX, 1_000_000, 500);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 4);
+        assert_eq!(batches[1].len(), 2);
+
+        // Longest-first input: one long item (500 tokens after clamping)
+        // caps its batch at 4, then the short tail (26 tokens) packs densely.
+        let mut sizes = vec![2000usize];
+        sizes.extend(std::iter::repeat_n(100, 20));
+        let mixed = pairs(&sizes);
+        let batches = pack_batches(&mixed, 100, usize::MAX, 1_000_000, 500);
+        assert_eq!(batches[0].len(), 4, "long head limits the first batch");
+        assert_eq!(batches.len(), 2, "short tail packs into one batch");
+
+        // A single item over budget still embeds alone.
+        let big = pairs(&[4000]);
+        assert_eq!(pack_batches(&big, 10, usize::MAX, 1000, 500).len(), 1);
     }
 
     #[test]

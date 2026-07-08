@@ -30,6 +30,65 @@ pub fn path_distance(a: &str, b: &str) -> usize {
     (dirs_a.len() - common) + (dirs_b.len() - common)
 }
 
+/// Directory names that mark a path as test/docs/example material.
+const TEST_DOC_DIRS: &[&str] = &[
+    "test",
+    "tests",
+    "testdata",
+    "testing",
+    "__tests__",
+    "spec",
+    "specs",
+    "e2e",
+    "fixtures",
+    "doc",
+    "docs",
+    "example",
+    "examples",
+    "sample",
+    "samples",
+    "bench",
+    "benches",
+    "benchmark",
+    "benchmarks",
+];
+
+/// Does this relative path live in test, docs, example, or benchmark
+/// territory? Checks directory components and common test-file name
+/// patterns (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`, `conftest.py`).
+pub fn is_test_or_docs_path(path: &str) -> bool {
+    let mut components = path.split('/').peekable();
+    while let Some(component) = components.next() {
+        let is_file = components.peek().is_none();
+        if !is_file {
+            let dir = component.to_ascii_lowercase();
+            if TEST_DOC_DIRS.contains(&dir.as_str()) {
+                return true;
+            }
+            continue;
+        }
+        let file = component.to_ascii_lowercase();
+        if file == "conftest.py" {
+            return true;
+        }
+        let stem = file.split('.').next().unwrap_or(&file);
+        if stem.starts_with("test_") || stem.ends_with("_test") || stem == "test" || stem == "tests"
+        {
+            return true;
+        }
+        // foo.test.js / foo.spec.ts style infixes.
+        let infixes: Vec<&str> = file.split('.').collect();
+        if infixes.len() > 2
+            && infixes[1..infixes.len() - 1]
+                .iter()
+                .any(|part| *part == "test" || *part == "spec")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Do two byte ranges intersect?
 pub fn byte_ranges_overlap(a: (usize, usize), b: (usize, usize)) -> bool {
     a.0 < b.1 && b.0 < a.1
@@ -91,6 +150,36 @@ mod tests {
         assert_eq!(line_distance((1, 10), (20, 30)), 10);
         assert_eq!(line_distance((20, 30), (1, 10)), 10);
         assert_eq!(line_distance((1, 10), (5, 15)), 0);
+    }
+
+    #[test]
+    fn test_and_docs_paths() {
+        for path in [
+            "tests/test_basic.py",
+            "test/express.static.js",
+            "src/module_test.go",
+            "context_test.go",
+            "src/foo.test.js",
+            "src/foo.spec.ts",
+            "docs/examples/app.py",
+            "examples/hello.rs",
+            "crates/core/benches/bench.rs",
+            "conftest.py",
+            "testdata/gen.py",
+        ] {
+            assert!(is_test_or_docs_path(path), "{path} should be test/docs");
+        }
+        for path in [
+            "src/flask/app.py",
+            "lib/response.js",
+            "context.go",
+            "src/latest.rs",
+            "src/testify.rs",
+            "attestation/verify.c",
+            "src/protest.py",
+        ] {
+            assert!(!is_test_or_docs_path(path), "{path} should be product");
+        }
     }
 
     #[test]

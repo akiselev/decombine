@@ -69,7 +69,8 @@ impl LanguageAdapter for PythonAdapter {
 }
 
 /// JavaScript/TypeScript: name anonymous functions from their assignment
-/// context (`const f = () => ...`, `{ f: function() {} }`, `x.f = ...`).
+/// context (`const f = () => ...`, `{ f: function() {} }`, `x.f = ...`) or,
+/// failing that, from the call they are passed to (`it("...", () => ...)`).
 struct JsLikeAdapter;
 
 impl LanguageAdapter for JsLikeAdapter {
@@ -98,17 +99,78 @@ impl LanguageAdapter for JsLikeAdapter {
             };
             if name.is_some() {
                 unit.name = name;
+                return;
             }
             break;
         }
+        unit.name = name_from_call_argument(source, unit.node, "arguments", &["string"]);
     }
 }
 
-/// Go: use the receiver type as the method scope.
+/// When an anonymous function is passed as a call argument, derive a display
+/// name from the callee and its first string argument: mocha's
+/// `it("sets ETag", function () {...})` becomes `it("sets ETag")`, and a bare
+/// `app.get("/", fn)` becomes `app.get("/")`.
+fn name_from_call_argument(
+    source: &str,
+    node: Node<'_>,
+    arguments_kind: &str,
+    string_kinds: &[&str],
+) -> Option<String> {
+    let arguments = node.parent()?;
+    if arguments.kind() != arguments_kind {
+        return None;
+    }
+    let call = arguments.parent()?;
+    if call.kind() != "call_expression" {
+        return None;
+    }
+    let callee_node = call.child_by_field_name("function")?;
+    let callee = source[callee_node.byte_range()].trim();
+    // Deep member chains read poorly; keep the last two segments.
+    let callee: String = match callee.rmatch_indices('.').nth(1) {
+        Some((i, _)) => callee[i + 1..].to_string(),
+        None => callee.to_string(),
+    };
+    if callee.len() > 40 || callee.contains('\n') {
+        return None;
+    }
+    let mut label = None;
+    for i in 0..arguments.named_child_count() as u32 {
+        let child = arguments.named_child(i)?;
+        if child.byte_range() == node.byte_range() {
+            break;
+        }
+        if string_kinds.contains(&child.kind()) {
+            let text = source[child.byte_range()]
+                .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                .trim();
+            let text: String = text.chars().take(48).collect();
+            label = Some(text);
+            break;
+        }
+    }
+    match label {
+        Some(label) => Some(format!("{callee}(\"{label}\")")),
+        None => Some(format!("{callee}(...)")),
+    }
+}
+
+/// Go: use the receiver type as the method scope, and name anonymous
+/// `func` literals from the call they are passed to (`t.Run("case", ...)`).
 struct GoAdapter;
 
 impl LanguageAdapter for GoAdapter {
     fn refine(&self, source: &str, unit: &mut PendingUnit<'_>) {
+        if unit.node.kind() == "func_literal" && unit.name.is_none() {
+            unit.name = name_from_call_argument(
+                source,
+                unit.node,
+                "argument_list",
+                &["interpreted_string_literal", "raw_string_literal"],
+            );
+            return;
+        }
         if unit.node.kind() != "method_declaration" || unit.scope.is_some() {
             return;
         }

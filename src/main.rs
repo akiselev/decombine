@@ -1,5 +1,11 @@
 use anyhow::{Context, Result, bail};
 use clap::Parser;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use decombine::analyze::compare::CompareAnalyzer;
 use decombine::analyze::concerns::ConcernAnalyzer;
@@ -33,6 +39,55 @@ fn report_meta(config: &Config, db: &Db, ctx: &AnalysisContext) -> report::Repor
             .collect(),
         ignore_file: config.ignore_file.display().to_string(),
     }
+}
+
+fn with_progress_indicator<T>(
+    message: impl Into<String>,
+    f: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let message = message.into();
+    let done = Arc::new(AtomicBool::new(false));
+    let worker_done = Arc::clone(&done);
+    let worker_message = message.clone();
+    eprintln!("model: [----------] {message}");
+    let progress = thread::spawn(move || {
+        let started = Instant::now();
+        let mut tick = 0usize;
+        while !worker_done.load(Ordering::Relaxed) {
+            thread::sleep(Duration::from_secs(2));
+            if worker_done.load(Ordering::Relaxed) {
+                break;
+            }
+            tick = tick.wrapping_add(1);
+            let pos = tick % 10;
+            let mut bar = String::with_capacity(10);
+            for idx in 0..10 {
+                bar.push(if idx == pos { '>' } else { '=' });
+            }
+            eprintln!(
+                "model: [{bar}] {worker_message} ({}s)",
+                started.elapsed().as_secs()
+            );
+        }
+    });
+    let result = f();
+    done.store(true, Ordering::Relaxed);
+    let _ = progress.join();
+    match &result {
+        Ok(_) => eprintln!("model: [==========] {message}: done"),
+        Err(_) => eprintln!("model: [!!!!!!!!!!] {message}: failed"),
+    }
+    result
+}
+
+fn load_embedder_with_progress(config: &Config) -> Result<Box<dyn decombine::embed::Embedder>> {
+    with_progress_indicator(
+        format!(
+            "loading/downloading embedding model {}",
+            config.embedding.model
+        ),
+        || decombine::embed::embedder_from_config(config),
+    )
 }
 
 fn analyze_duplicates(config: &Config, db: &Db) -> Result<()> {
@@ -111,7 +166,9 @@ fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
         left_label: left,
         right_label: right,
     };
-    let output = analyzer.run(&ctx, &comparison)?;
+    let output = analyzer.run_with_progress(&ctx, &comparison, |phase| {
+        eprintln!("compare: {phase}");
+    })?;
     report::write_comparison_report(
         &config.report_dir,
         &report_meta(config, db, &ctx),
@@ -175,7 +232,7 @@ fn main() -> Result<()> {
         Command::Embed => {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
-            let mut embedder = decombine::embed::embedder_from_config(&config)?;
+            let mut embedder = load_embedder_with_progress(&config)?;
             let stats = decombine::embed::embed_pending_with_progress(
                 &db,
                 embedder.as_mut(),
@@ -214,7 +271,7 @@ fn main() -> Result<()> {
             ModelsCommand::Download => {
                 let config = Config::load(&cli.config)?;
                 // Constructing the backend downloads the model into cache.
-                let embedder = decombine::embed::embedder_from_config(&config)?;
+                let embedder = load_embedder_with_progress(&config)?;
                 let identity = embedder.identity();
                 println!(
                     "model {} ready (dims={}, cache={})",

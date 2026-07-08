@@ -365,6 +365,56 @@ registry.callback = function (event) {
     }
 
     #[test]
+    fn javascript_callback_named_from_enclosing_call() {
+        let source = r#"
+describe('GET /users', function () {
+    it('responds with json', function (done) {
+        const app = createApp();
+        request(app).get('/users').expect(200, done);
+    });
+});
+
+app.get('/health', function (req, res) {
+    const status = check(req);
+    res.send(status);
+});
+"#;
+        let units = extract("javascript", source, 3);
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert!(
+            names.contains(&"it(\"responds with json\")"),
+            "names: {names:?}"
+        );
+        assert!(names.contains(&"app.get(\"/health\")"), "names: {names:?}");
+        assert!(
+            names.contains(&"describe(\"GET /users\")"),
+            "names: {names:?}"
+        );
+    }
+
+    #[test]
+    fn go_func_literal_named_from_enclosing_call() {
+        let source = r#"
+package main
+
+func TestThing(t *testing.T) {
+    t.Run("serves existing file", func(t *testing.T) {
+        w := newRecorder()
+        c := createContext(w)
+        c.File("testdata/file.txt")
+        assertEqual(t, 200, w.Code)
+    })
+}
+"#;
+        let units = extract("go", source, 3);
+        let names: Vec<&str> = units.iter().map(|u| u.name.as_str()).collect();
+        assert!(
+            names.contains(&"t.Run(\"serves existing file\")"),
+            "names: {names:?}"
+        );
+    }
+
+    #[test]
     fn nested_units_both_extracted() {
         let source = r#"
 fn outer(items: Vec<i32>) -> Vec<i32> {

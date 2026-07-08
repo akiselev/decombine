@@ -6,11 +6,11 @@ use std::path::Path;
 
 use anyhow::{Context as _, Result};
 
-use crate::analyze::compare::{ComparisonReport, MatchClass, MatchRecord};
+use crate::analyze::compare::{CalibrationInfo, ComparisonReport, MatchClass, MatchRecord};
 use crate::analyze::concerns::ConcernReport;
 use crate::analyze::context::{AnalysisContext, CodeUnitRef};
-use crate::analyze::duplicate::DuplicateReport;
-use crate::config::{AnalysisConfig, RetentionMode};
+use crate::analyze::duplicate::{ClusterKind, DuplicateReport};
+use crate::config::{AnalysisConfig, ComparisonConfig, RetentionMode};
 use crate::db::ModelIdentity;
 
 #[derive(Debug, Clone)]
@@ -28,6 +28,18 @@ pub struct ReportMeta {
 
 fn header(out: &mut String, title: &str, meta: &ReportMeta) {
     let _ = writeln!(out, "# {title}\n");
+    model_header(out, meta);
+    let _ = writeln!(
+        out,
+        "- Thresholds: candidate {} / similarity {} / rerank {}",
+        meta.analysis.candidate_threshold,
+        meta.analysis.similarity_threshold,
+        meta.analysis.rerank_threshold
+    );
+    run_header(out, meta);
+}
+
+fn model_header(out: &mut String, meta: &ReportMeta) {
     let _ = writeln!(
         out,
         "- Model: `{}` backend `{}` v{} ({} dims, provider {}{})",
@@ -42,19 +54,61 @@ fn header(out: &mut String, title: &str, meta: &ReportMeta) {
             .map(|q| format!(", {q}"))
             .unwrap_or_default(),
     );
-    let _ = writeln!(
-        out,
-        "- Thresholds: candidate {} / similarity {} / rerank {}",
-        meta.analysis.candidate_threshold,
-        meta.analysis.similarity_threshold,
-        meta.analysis.rerank_threshold
-    );
+}
+
+fn run_header(out: &mut String, meta: &ReportMeta) {
     let _ = writeln!(out, "- Retention: {}", meta.retention.as_str());
     let _ = writeln!(out, "- Run: {}", meta.timestamp);
     for (label, root) in &meta.projects {
         let _ = writeln!(out, "- Project `{label}`: {root}");
     }
     let _ = writeln!(out);
+}
+
+fn comparison_header(
+    out: &mut String,
+    title: &str,
+    meta: &ReportMeta,
+    config: &ComparisonConfig,
+    calibration: Option<&CalibrationInfo>,
+) {
+    let _ = writeln!(out, "# {title}\n");
+    model_header(out, meta);
+    let _ = writeln!(
+        out,
+        "- Comparison thresholds: candidate {} / match {} / top-k {} / min nodes {} / right fanout {} / abtt {}",
+        config.candidate_threshold,
+        config.match_threshold,
+        config.top_k_per_unit,
+        config.min_body_node_count,
+        config.max_right_candidate_fanout,
+        config.abtt_directions
+    );
+    if let Some(cal) = calibration {
+        let _ = writeln!(
+            out,
+            "- Calibration: background ({status}): background mean {mean:.4} ± {std:.4} \
+             (n={n}), top-1 anchor {anchor:.4}, effective candidate {cand:.4} / match {mat:.4}",
+            status = if cal.applied {
+                "applied"
+            } else {
+                "range too narrow, raw thresholds kept"
+            },
+            mean = cal.background_mean,
+            std = cal.background_std,
+            n = cal.sampled_pairs,
+            anchor = cal.top1_anchor,
+            cand = cal.effective_candidate_threshold,
+            mat = cal.effective_match_threshold,
+        );
+    }
+    let _ = writeln!(
+        out,
+        "- Hints: names {} / paths {}",
+        if config.use_name_hints { "on" } else { "off" },
+        if config.use_path_hints { "on" } else { "off" }
+    );
+    run_header(out, meta);
 }
 
 /// Source text for a unit: stored display source when retained, otherwise
@@ -108,13 +162,30 @@ pub fn write_duplicate_report(
     if report.clusters.is_empty() {
         let _ = writeln!(index, "No duplicate clusters above the thresholds.");
     } else {
-        let _ = writeln!(index, "## Clusters\n");
-        let _ = writeln!(
-            index,
-            "| # | Cluster | Units | Top raw | Boosted | Members |"
-        );
-        let _ = writeln!(index, "| --- | --- | --- | --- | --- | --- |");
+        // Clusters arrive sorted product-first; one table per section so
+        // product findings are not drowned in test/docs boilerplate.
+        let mut current_kind = None;
         for (rank, cluster) in report.clusters.iter().enumerate() {
+            if current_kind != Some(cluster.kind) {
+                if current_kind.is_some() {
+                    let _ = writeln!(index);
+                }
+                current_kind = Some(cluster.kind);
+                let _ = writeln!(index, "## {}\n", cluster.kind.title());
+                if cluster.kind == ClusterKind::Mixed {
+                    let _ = writeln!(
+                        index,
+                        "Clusters mixing product and test/docs units. A product \
+                         unit matched to its own test is a common false \
+                         positive; review these with suspicion.\n"
+                    );
+                }
+                let _ = writeln!(
+                    index,
+                    "| # | Cluster | Units | Top raw | Boosted | Members |"
+                );
+                let _ = writeln!(index, "| --- | --- | --- | --- | --- | --- |");
+            }
             let names: Vec<String> = cluster
                 .members
                 .iter()
@@ -198,8 +269,9 @@ pub fn write_duplicate_report(
         let _ = writeln!(page, "# Cluster {} — `{}`\n", rank + 1, cluster.hash);
         let _ = writeln!(
             page,
-            "{} units, top similarity {:.4} (boosted {:.4}). Ignore with:\n",
+            "{} units ({}), top similarity {:.4} (boosted {:.4}). Ignore with:\n",
             cluster.members.len(),
+            cluster.kind.title(),
             cluster.top_raw,
             cluster.top_boosted
         );
@@ -342,6 +414,32 @@ fn record_line(ctx: &AnalysisContext, record: &MatchRecord) -> String {
     )
 }
 
+fn record_examples(
+    page: &mut String,
+    meta: &ReportMeta,
+    ctx: &AnalysisContext,
+    records: &[&MatchRecord],
+) {
+    let examples: Vec<&MatchRecord> = records.iter().copied().take(5).collect();
+    if examples.is_empty() {
+        return;
+    }
+    let _ = writeln!(page, "## Examples\n");
+    for (idx, record) in examples.iter().enumerate() {
+        let _ = writeln!(page, "### Example {}\n", idx + 1);
+        let _ = writeln!(page, "{}\n", record_line(ctx, record));
+        for (label, units) in [("Left", &record.left), ("Right", &record.right)] {
+            if let Some(&unit_idx) = units.first() {
+                let unit = &ctx.units[unit_idx];
+                let _ = writeln!(page, "**{label}:** {}\n", location(unit));
+                let _ = writeln!(page, "```{}", unit.language_id);
+                let _ = writeln!(page, "{}", unit_source(meta, unit).trim_end());
+                let _ = writeln!(page, "```\n");
+            }
+        }
+    }
+}
+
 /// Write `compare/index.md` plus one detail file per match class.
 pub fn write_comparison_report(
     dir: &Path,
@@ -363,13 +461,15 @@ pub fn write_comparison_report(
     ];
 
     let mut index = String::new();
-    header(
+    comparison_header(
         &mut index,
         &format!(
             "Comparison: `{}` (reference) vs `{}` (candidate)",
             report.left_label, report.right_label
         ),
         meta,
+        &report.config,
+        report.calibration.as_ref(),
     );
     let _ = writeln!(
         index,
@@ -392,17 +492,39 @@ pub fn write_comparison_report(
     }
     let _ = writeln!(index);
 
-    for (title, rows) in [
+    if !report.suppressed_right_candidates.is_empty() {
+        let _ = writeln!(index, "## Suppressed right-side candidate targets\n");
+        let _ = writeln!(
+            index,
+            "Right-side units that too many left units selected as their best semantic candidate.\n"
+        );
+        let _ = writeln!(index, "| Fanout | Right unit |");
+        let _ = writeln!(index, "| --- | --- |");
+        for candidate in report.suppressed_right_candidates.iter().take(25) {
+            let unit = &ctx.units[candidate.right];
+            let _ = writeln!(
+                index,
+                "| {} | {} ({}) |",
+                candidate.fanout,
+                display_name(unit),
+                location(unit)
+            );
+        }
+        let _ = writeln!(index);
+    }
+
+    let coverage_sections = [
         ("Coverage by directory", &report.coverage_by_directory),
         ("Coverage by language", &report.coverage_by_language),
-    ] {
+    ];
+    for (idx, (title, rows)) in coverage_sections.iter().enumerate() {
         let _ = writeln!(index, "## {title}\n");
         let _ = writeln!(
             index,
             "| Group | Left units | Covered | Possible | Missing |"
         );
         let _ = writeln!(index, "| --- | --- | --- | --- | --- |");
-        for row in rows {
+        for row in rows.iter() {
             let _ = writeln!(
                 index,
                 "| `{}` | {} | {} | {} | {} |",
@@ -417,7 +539,9 @@ pub fn write_comparison_report(
                 row.missing
             );
         }
-        let _ = writeln!(index);
+        if idx + 1 < coverage_sections.len() {
+            let _ = writeln!(index);
+        }
     }
     std::fs::write(compare_dir.join("index.md"), index)?;
 
@@ -451,6 +575,8 @@ pub fn write_comparison_report(
             }
             _ => {}
         }
+        record_examples(&mut page, meta, ctx, &records);
+        let _ = writeln!(page, "## All records\n");
         for record in records {
             let _ = writeln!(page, "{}", record_line(ctx, record));
         }

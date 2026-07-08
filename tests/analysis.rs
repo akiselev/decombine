@@ -647,3 +647,207 @@ fn hints_cannot_rescue_weak_edges() {
     let possible = &report.matches[0];
     assert!(possible.hint_bonus > 0.0 && possible.hint_bonus <= 0.04);
 }
+
+#[test]
+fn comparison_min_body_node_count_filters_matches_only() {
+    let mut small_left = unit("v1", "src/count.rs", "count", None, "h1", 1);
+    let mut small_right = unit("v2", "lib/count.rs", "count", None, "h2", 1);
+    small_left.body_node_count = 12;
+    small_right.body_node_count = 12;
+
+    let context = ctx(
+        vec![small_left, small_right],
+        vec![
+            Some(normalize(vec![1.0, 0.0, 0.0, 0.0])),
+            Some(normalize(vec![1.0, 0.01, 0.0, 0.0])),
+        ],
+        &["v1", "v2"],
+    );
+    let mut config = comparison_config();
+    config.min_body_node_count = 20;
+    let report = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+
+    assert_eq!(report.count(MatchClass::StrongMatch), 0);
+    assert_eq!(report.count(MatchClass::PossibleMatch), 0);
+    assert_eq!(report.count(MatchClass::MissingInRight), 1);
+    assert_eq!(report.count(MatchClass::NewInRight), 1);
+}
+
+#[test]
+fn comparison_background_calibration_rescales_thresholds() {
+    // A "compressed-scale" model: true pairs score 0.8 cosine, background
+    // pairs score 0.0. Raw thresholds (0.78/0.86) classify the pairs as
+    // merely possible; background calibration maps 0.86 to
+    // mean + 0.86 * (anchor - mean) = 0.4 + 0.86 * 0.4 = 0.744 and
+    // recovers them as strong.
+    let units = vec![
+        unit("v1", "src/a.rs", "alpha", None, "h1", 10),
+        unit("v1", "src/b.rs", "beta", None, "h2", 10),
+        unit("v2", "lib/c.rs", "gamma", None, "h3", 10),
+        unit("v2", "lib/d.rs", "delta", None, "h4", 10),
+    ];
+    let vectors = vec![
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+        Some(vec![0.0, 0.0, 1.0, 0.0]),
+        Some(vec![0.8, 0.6, 0.0, 0.0]),
+        Some(vec![0.0, 0.0, 0.8, 0.6]),
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+
+    let raw = compare(&context);
+    assert_eq!(raw.count(MatchClass::StrongMatch), 0);
+    assert_eq!(raw.count(MatchClass::PossibleMatch), 2);
+    assert!(raw.calibration.is_none());
+
+    let mut config = comparison_config();
+    config.calibration = "background".into();
+    let calibrated = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+
+    assert_eq!(calibrated.count(MatchClass::StrongMatch), 2);
+    let cal = calibrated.calibration.as_ref().unwrap();
+    assert!(cal.applied);
+    assert_eq!(cal.sampled_pairs, 4);
+    assert!((cal.background_mean - 0.4).abs() < 1e-4);
+    assert!((cal.top1_anchor - 0.8).abs() < 1e-4);
+    assert!((cal.effective_match_threshold - 0.744).abs() < 1e-3);
+}
+
+#[test]
+fn comparison_abtt_removes_common_and_nuisance_directions() {
+    // Axis 0 is a shared "boilerplate" component and axis 3 a high-variance
+    // nuisance component (think body length). Raw cosines pair a↔b' and
+    // b↔a' (wrong, ~0.99) while the true pairs a↔a'/b↔b' score ~0.65.
+    // ABTT with one dropped direction removes the mean (axis 0) and the top
+    // centered principal direction (axis 3), leaving the discriminative
+    // residuals: true pairs win and the impostors go negative.
+    let units = vec![
+        unit("v1", "src/a.rs", "alpha", None, "h1", 10),
+        unit("v1", "src/b.rs", "beta", None, "h2", 10),
+        unit("v1", "src/c.rs", "gamma", None, "h3", 10),
+        unit("v2", "lib/d.rs", "delta", None, "h4", 10),
+        unit("v2", "lib/e.rs", "epsilon", None, "h5", 10),
+    ];
+    let vectors = vec![
+        Some(normalize(vec![1.0, 0.1, 0.0, 0.5])),  // a
+        Some(normalize(vec![1.0, 0.0, 0.1, -0.5])), // b
+        Some(normalize(vec![1.0, 0.0, 0.0, 0.2])),  // c: no counterpart
+        Some(normalize(vec![1.0, 0.1, 0.0, -0.4])), // a'
+        Some(normalize(vec![1.0, 0.0, 0.1, 0.45])), // b'
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+
+    let mut config = comparison_config();
+    config.use_name_hints = false;
+    config.use_path_hints = false;
+    let raw = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+    // Nuisance alignment produces confidently wrong pairings: a and c both
+    // claim b' (a false merge), and b pairs with a'.
+    assert!(
+        raw.matches
+            .iter()
+            .any(|m| m.class == MatchClass::Merge && m.left == [0, 2] && m.right == [4])
+    );
+    assert!(
+        raw.matches
+            .iter()
+            .any(|m| m.class == MatchClass::StrongMatch && m.left == [1] && m.right == [3])
+    );
+
+    config.abtt_directions = 1;
+    config.candidate_threshold = 0.5;
+    config.match_threshold = 0.8;
+    let abtt = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+    let abtt_strong: Vec<_> = abtt
+        .matches
+        .iter()
+        .filter(|m| m.class == MatchClass::StrongMatch)
+        .collect();
+    assert_eq!(abtt_strong.len(), 2);
+    assert!(abtt_strong.iter().any(|m| m.left == [0] && m.right == [3])); // a ↔ a'
+    assert!(abtt_strong.iter().any(|m| m.left == [1] && m.right == [4])); // b ↔ b'
+    assert_eq!(abtt.count(MatchClass::MissingInRight), 1); // c
+    assert_eq!(abtt.count(MatchClass::NewInRight), 0);
+}
+
+#[test]
+fn comparison_calibration_falls_back_on_narrow_range() {
+    // Every cross pair scores identically: anchor == background mean, so
+    // the range guard keeps the configured raw thresholds.
+    let units = vec![
+        unit("v1", "src/a.rs", "alpha", None, "h1", 10),
+        unit("v2", "lib/b.rs", "beta", None, "h2", 10),
+    ];
+    let vectors = vec![
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+    let mut config = comparison_config();
+    config.calibration = "background".into();
+    let report = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+    let cal = report.calibration.as_ref().unwrap();
+    assert!(!cal.applied);
+    assert!((cal.effective_match_threshold - 0.86).abs() < 1e-4);
+    // The identical pair still matches strongly under raw thresholds.
+    assert_eq!(report.count(MatchClass::StrongMatch), 1);
+}
+
+#[test]
+fn comparison_max_right_candidate_fanout_suppresses_magnets() {
+    let context = ctx(
+        vec![
+            unit("v1", "src/a.rs", "alpha", None, "h1", 1),
+            unit("v1", "src/b.rs", "beta", None, "h2", 10),
+            unit("v1", "src/c.rs", "gamma", None, "h3", 20),
+            unit("v2", "lib/magnet.rs", "count", None, "h4", 1),
+        ],
+        vec![
+            Some(normalize(vec![1.0, 0.0, 0.0, 0.0])),
+            Some(normalize(vec![1.0, 0.1, 0.0, 0.0])),
+            Some(normalize(vec![1.0, 0.2, 0.0, 0.0])),
+            Some(normalize(vec![1.0, 0.05, 0.0, 0.0])),
+        ],
+        &["v1", "v2"],
+    );
+    let mut config = comparison_config();
+    config.max_right_candidate_fanout = 2;
+    let report = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+
+    assert_eq!(report.count(MatchClass::StrongMatch), 0);
+    assert_eq!(report.count(MatchClass::PossibleMatch), 0);
+    assert_eq!(report.count(MatchClass::MissingInRight), 3);
+    assert_eq!(report.count(MatchClass::NewInRight), 1);
+    assert_eq!(report.suppressed_right_candidates.len(), 1);
+    assert_eq!(report.suppressed_right_candidates[0].right, 3);
+    assert_eq!(report.suppressed_right_candidates[0].fanout, 3);
+}
