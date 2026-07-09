@@ -57,8 +57,15 @@ rewrite) indexed into one database and compared:
 
 ## Default model decision
 
-**Default: `BGESmallENV15`.** On these fixtures every candidate found all
-known duplicates, so quality does not yet justify a slower model:
+**Default (2026-07-08 onward): `CodeRankEmbed`.** The token-truncation audit
+(EXPERIMENTS.md 2026-07-08) showed BGE's 512-token cap silently truncates
+5-13% of units on heavy real codebases; CodeRankEmbed's 2048-token context
+drops that to <1%. It is a managed model (downloaded + hash-verified on first
+use). `BGESmallENV15` stays selectable as the lightweight, no-download option
+and remains the baseline in the tables below.
+
+**Historical default: `BGESmallENV15`.** On these fixtures every candidate
+found all known duplicates, so quality did not yet justify a slower model:
 
 | | BGESmallENV15 | BGEBaseENV15 | JinaEmbeddingsV2BaseCode |
 | --- | --- | --- | --- |
@@ -92,8 +99,14 @@ before being enabled.
 
 ## Threshold calibration notes
 
-Defaults kept at candidate 0.88 / similarity 0.92 / rerank 0.94 for
-BGESmallENV15: on the fixtures, rename-level duplicates score ≥0.95 and
+Defaults are now candidate 0.70 / similarity 0.81 / rerank 0.85 for the
+`CodeRankEmbed` default, ported from the BGE values by background-relative
+position (altium backgrounds: BGE 0.698, CodeRank 0.261). Raw cosine
+thresholds do not transfer across models; raise all three to the BGE values
+below when selecting `BGESmallENV15`.
+
+The BGE calibration (candidate 0.88 / similarity 0.92 / rerank 0.94): on the
+fixtures, rename-level duplicates score ≥0.95 and
 unrelated code scores ≤0.85, so the current gap cleanly separates them
 while letting the distance boost rescue far-apart pairs in the 0.88–0.92
 band. Comparison defaults (candidate 0.78 / match 0.86) produced useful

@@ -1,13 +1,17 @@
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use fastembed::{
     EmbeddingModel, ExecutionProviderDispatch, InitOptionsUserDefined, Pooling, TextEmbedding,
     TextInitOptions, TokenizerFiles, UserDefinedEmbeddingModel,
 };
 use sha2::{Digest, Sha256};
 
-use crate::config::{CustomModelConfig, EmbeddingConfig, ProviderMode};
+use crate::config::{
+    CustomModelConfig, EmbeddingConfig, ManagedModel, ProviderMode, managed_model,
+};
 use crate::db::ModelIdentity;
 use crate::embed::Embedder;
 
@@ -17,6 +21,22 @@ pub struct FastembedBackend {
     identity: ModelIdentity,
     model: TextEmbedding,
     max_sequence_length: usize,
+    /// Encodes with truncation disabled, so a length past `max_sequence_length`
+    /// is reported in full instead of clamped. Built once by cloning the
+    /// inference tokenizer (avoids naming the `tokenizers` type directly).
+    untruncated_len: LenCounter,
+}
+
+/// Counts a text's tokens with truncation disabled; `None` if encoding fails.
+type LenCounter = Box<dyn Fn(&str) -> Option<usize> + Send + Sync>;
+
+/// A cloned copy of the model's tokenizer with truncation switched off, wrapped
+/// as a length-counting closure. The clone leaves the inference tokenizer's
+/// truncation config untouched.
+fn untruncated_len_fn(model: &TextEmbedding) -> LenCounter {
+    let mut tokenizer = model.tokenizer.clone();
+    let _ = tokenizer.with_truncation(None);
+    Box::new(move |text| tokenizer.encode(text, true).ok().map(|e| e.len()))
 }
 
 /// Tokenizer truncation length fastembed applies to catalog models (its
@@ -119,6 +139,7 @@ impl FastembedBackend {
         if let Some(custom) = &config.custom {
             let (tokenizer_hash, model_hash) = custom_artifact_hashes(custom)?;
             let model = load_custom_model(custom, execution_providers)?;
+            let untruncated_len = untruncated_len_fn(&model);
             return Ok(Self {
                 identity: ModelIdentity {
                     backend: "fastembed".into(),
@@ -141,6 +162,46 @@ impl FastembedBackend {
                 },
                 model,
                 max_sequence_length: custom.max_length,
+                untruncated_len,
+            });
+        }
+        if let Some(managed) = managed_model(&config.model) {
+            // A managed model with no explicit `custom` block: materialize the
+            // pinned files into the cache (download + verify on first use) and
+            // load them through the same custom ONNX path.
+            let dir = managed_model_dir(config, managed);
+            ensure_managed_files(managed, &dir)
+                .with_context(|| format!("materializing managed model {}", managed.name))?;
+            let custom = CustomModelConfig {
+                dir: dir.clone(),
+                onnx_file: PathBuf::from(managed.onnx_file),
+                dimensions: managed.dimensions,
+                pooling: managed.pooling.to_string(),
+                max_length: managed.max_length,
+            };
+            let (tokenizer_hash, model_hash) = custom_artifact_hashes(&custom)?;
+            let model = load_custom_model(&custom, execution_providers)?;
+            let untruncated_len = untruncated_len_fn(&model);
+            return Ok(Self {
+                identity: ModelIdentity {
+                    backend: "fastembed".into(),
+                    backend_version: env!("DECOMBINE_FASTEMBED_VERSION").into(),
+                    runtime_version: Some(format!("ort {}", env!("DECOMBINE_ORT_VERSION"))),
+                    model: config.model.clone(),
+                    // Path-independent so the identity is stable across machines,
+                    // unlike an explicit custom block's absolute-path revision.
+                    revision: Some(format!("managed:{}@{}", managed.repo, managed.revision)),
+                    dimensions: managed.dimensions,
+                    tokenizer_hash: Some(tokenizer_hash),
+                    model_hash: Some(model_hash),
+                    normalize: config.normalize,
+                    execution_provider: provider,
+                    quantization: None,
+                    cache_path: Some(dir.to_string_lossy().into_owned()),
+                },
+                model,
+                max_sequence_length: managed.max_length,
+                untruncated_len,
             });
         }
         let model_name = resolve_model(&config.model, config.quantized)?;
@@ -161,6 +222,7 @@ impl FastembedBackend {
             .with_execution_providers(execution_providers);
         let model = TextEmbedding::try_new(options)
             .with_context(|| format!("loading fastembed model {}", config.model))?;
+        let untruncated_len = untruncated_len_fn(&model);
 
         Ok(Self {
             identity: ModelIdentity {
@@ -179,6 +241,7 @@ impl FastembedBackend {
             },
             model,
             max_sequence_length: CATALOG_MAX_LENGTH,
+            untruncated_len,
         })
     }
 }
@@ -245,7 +308,7 @@ fn fallback_or_error(
 /// rather than a silent CPU fallback at session-build time.
 #[cfg(feature = "accel")]
 fn build_accelerator(name: &str, require: bool) -> ProviderResolution {
-    use ort::ep::{CoreML, DirectML, ExecutionProvider, OpenVINO, CUDA};
+    use ort::ep::{CUDA, CoreML, DirectML, ExecutionProvider, OpenVINO};
 
     macro_rules! resolve {
         ($ep:expr, $compiled:expr) => {{
@@ -279,6 +342,113 @@ fn build_accelerator(_name: &str, _require: bool) -> ProviderResolution {
     ProviderResolution::NotCompiled
 }
 
+/// Directory a managed model's files materialize into: a `custom/<id>` dir
+/// beside fastembed's catalog cache so both share one decombine cache root.
+fn managed_model_dir(config: &EmbeddingConfig, managed: &ManagedModel) -> PathBuf {
+    let catalog = match &config.cache_dir {
+        Some(dir) => dir.clone(),
+        None => std::env::var_os("FASTEMBED_CACHE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(default_cache_dir),
+    };
+    let root = catalog.parent().map(Path::to_path_buf).unwrap_or(catalog);
+    root.join("custom").join(managed.cache_id)
+}
+
+/// Ensure every pinned file is present and hash-matches, downloading any that
+/// are missing or stale. Verification is by content hash, so a partially
+/// written or tampered file is re-fetched rather than trusted.
+fn ensure_managed_files(managed: &ManagedModel, dir: &Path) -> Result<()> {
+    for file in managed.files {
+        let dest = dir.join(file.path);
+        if managed_file_ok(&dest, file)? {
+            continue;
+        }
+        eprintln!(
+            "downloading {} ({:.1} MB) for model {} ...",
+            file.path,
+            file.size as f64 / 1e6,
+            managed.name
+        );
+        download_and_verify(managed, file, &dest)?;
+    }
+    Ok(())
+}
+
+/// Whether an on-disk file already matches the pinned size and hash.
+fn managed_file_ok(dest: &Path, file: &crate::config::ManagedFile) -> Result<bool> {
+    let Ok(meta) = std::fs::metadata(dest) else {
+        return Ok(false);
+    };
+    if meta.len() != file.size {
+        return Ok(false);
+    }
+    Ok(sha256_file(dest)? == file.sha256)
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file = File::open(path).with_context(|| format!("reading {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+/// Stream a file from Hugging Face to `<dest>.part`, hashing as it goes, and
+/// promote it to `dest` only if the hash matches. A mismatch (moved branch,
+/// corruption, tampering) removes the partial file and errors.
+fn download_and_verify(
+    managed: &ManagedModel,
+    file: &crate::config::ManagedFile,
+    dest: &Path,
+) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/{}",
+        managed.repo, managed.revision, file.path
+    );
+    let response = ureq::get(&url)
+        .call()
+        .with_context(|| format!("downloading {url}"))?;
+    let mut reader = response.into_body().into_reader();
+
+    let tmp = dest.with_extension("part");
+    let mut hasher = Sha256::new();
+    {
+        let mut out = File::create(&tmp).with_context(|| format!("creating {}", tmp.display()))?;
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            out.write_all(&buf[..n])?;
+        }
+        out.flush()?;
+    }
+    let got = hex::encode(hasher.finalize());
+    if got != file.sha256 {
+        let _ = std::fs::remove_file(&tmp);
+        bail!(
+            "downloaded {} has hash {got}, expected {} — refusing to use it",
+            file.path,
+            file.sha256
+        );
+    }
+    std::fs::rename(&tmp, dest).with_context(|| format!("finalizing {}", dest.display()))?;
+    Ok(())
+}
+
 fn default_cache_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_CACHE_HOME") {
         return PathBuf::from(dir).join("decombine").join("models");
@@ -309,6 +479,10 @@ impl Embedder for FastembedBackend {
             .encode(text, true)
             .ok()
             .map(|encoding| encoding.len())
+    }
+
+    fn count_tokens_untruncated(&self, text: &str) -> Option<usize> {
+        (self.untruncated_len)(text)
     }
 
     fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {

@@ -33,6 +33,87 @@ pub const SUPPORTED_MODELS: &[(&str, usize, bool)] = &[
     ("NomicEmbedTextV15", 768, true),
 ];
 
+/// A model decombine manages itself (downloads + verifies) rather than
+/// delegating to fastembed's catalog. Backed by a local ONNX export loaded
+/// through the custom-model path once materialized; the backend fetches the
+/// files on first use and gates them against these pinned hashes.
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedModel {
+    /// Name used in `embedding.model`.
+    pub name: &'static str,
+    /// Subdirectory under the custom cache the files materialize into.
+    pub cache_id: &'static str,
+    /// Hugging Face repo the files are fetched from.
+    pub repo: &'static str,
+    /// Repo revision (branch/tag/commit) resolved for downloads. Integrity is
+    /// gated by the per-file SHA256 regardless, so a moved branch fails safe.
+    pub revision: &'static str,
+    /// ONNX graph path, relative to the materialized directory.
+    pub onnx_file: &'static str,
+    pub dimensions: usize,
+    /// `mean` or `cls`.
+    pub pooling: &'static str,
+    /// Tokenizer truncation length.
+    pub max_length: usize,
+    /// Files that must be present and hash-verified, relative to the dir.
+    pub files: &'static [ManagedFile],
+}
+
+/// One file of a `ManagedModel`, pinned by content hash and size.
+#[derive(Debug, Clone, Copy)]
+pub struct ManagedFile {
+    pub path: &'static str,
+    pub sha256: &'static str,
+    pub size: u64,
+}
+
+/// Models decombine downloads and verifies itself. `CodeRankEmbed` is the
+/// quality-leading code model (2048-token context); its files are the
+/// community `Zenabius/CodeRankEmbed-onnx` fp32 export, verified against the
+/// Torch reference at pooled cosine 1.000000.
+pub const MANAGED_MODELS: &[ManagedModel] = &[ManagedModel {
+    name: "CodeRankEmbed",
+    cache_id: "coderankembed",
+    repo: "Zenabius/CodeRankEmbed-onnx",
+    revision: "main",
+    onnx_file: "onnx/model.onnx",
+    dimensions: 768,
+    pooling: "mean",
+    max_length: 2048,
+    files: &[
+        ManagedFile {
+            path: "onnx/model.onnx",
+            sha256: "87edaf9f6d544e9d46ed81e1e13610ac01b1c1904e3b26fcf1ce6744a0319ffa",
+            size: 548_260_181,
+        },
+        ManagedFile {
+            path: "tokenizer.json",
+            sha256: "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+            size: 711_649,
+        },
+        ManagedFile {
+            path: "config.json",
+            sha256: "5ff856a41d0f53ef2d74520627d464bd75c2efd8f26f381bd528654895c29b6c",
+            size: 1_525,
+        },
+        ManagedFile {
+            path: "special_tokens_map.json",
+            sha256: "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+            size: 695,
+        },
+        ManagedFile {
+            path: "tokenizer_config.json",
+            sha256: "7809f768ee3614618b3f1b91dcbfab4f6a9d4b79fb1ad5d17feb65a7c1bb5b7a",
+            size: 1_417,
+        },
+    ],
+}];
+
+/// The managed model of this name, if any.
+pub fn managed_model(name: &str) -> Option<&'static ManagedModel> {
+    MANAGED_MODELS.iter().find(|m| m.name == name)
+}
+
 pub const EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "coreml", "directml", "openvino"];
 
 #[derive(Debug, thiserror::Error)]
@@ -153,6 +234,21 @@ pub enum ConfigError {
     BadComparisonCalibrationSamplePairs(usize),
     #[error("`comparison.abtt_directions` must be at most 64, got {0}")]
     BadComparisonAbttDirections(usize),
+    #[error(
+        "`comparison.calibration_anchor` must be `top1_p95`, `same_name`, or `hybrid`, got {0:?}"
+    )]
+    BadComparisonAnchor(String),
+    #[error("`comparison.min_same_name_anchors` must be between 1 and 100000, got {0}")]
+    BadComparisonMinSameNameAnchors(usize),
+    #[error(
+        "`comparison` sigma knobs must be finite in [0, 100] with candidate_sigma_floor <= match_sigma_floor, \
+         got candidate_sigma_floor={candidate} match_sigma_floor={match_floor} strong_min_margin_sigma={margin}"
+    )]
+    BadComparisonSigma {
+        candidate: f64,
+        match_floor: f64,
+        margin: f64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -282,6 +378,9 @@ impl EmbeddingConfig {
     pub fn dimensions(&self) -> usize {
         if let Some(custom) = &self.custom {
             return custom.dimensions;
+        }
+        if let Some(managed) = managed_model(&self.model) {
+            return managed.dimensions;
         }
         SUPPORTED_MODELS
             .iter()
@@ -437,6 +536,33 @@ pub struct ComparisonConfig {
     /// Random cross-project pairs sampled to estimate background similarity.
     #[serde(default = "default_calibration_sample_pairs")]
     pub calibration_sample_pairs: usize,
+    /// Which anchor maps normalized position 1.0 onto raw cosine under
+    /// `background` calibration. `top1_p95` is the 95th percentile of per-left
+    /// top-1 scores (breaks down on low-overlap corpora, where it collapses and
+    /// the effective bar drops enough to readmit false positives). `same_name`
+    /// uses the median cosine of unambiguous same-name/same-kind cross-project
+    /// pairs (a proxy for true renames). `hybrid` takes the larger of the two
+    /// when enough same-name anchors exist, else falls back to `top1_p95`.
+    #[serde(default = "default_calibration_anchor")]
+    pub calibration_anchor: String,
+    /// Minimum unambiguous same-name anchors required before the same-name
+    /// anchor is trusted (in `same_name`/`hybrid` modes).
+    #[serde(default = "default_min_same_name_anchors")]
+    pub min_same_name_anchors: usize,
+    /// Floor on the effective candidate threshold, in background sigmas above
+    /// the background mean (`bg + k*sigma`). Clamps the pathological low-anchor
+    /// case so calibration can only ever tighten, never loosen below noise.
+    #[serde(default = "default_candidate_sigma_floor")]
+    pub candidate_sigma_floor: f64,
+    /// Floor on the effective match threshold, in background sigmas.
+    #[serde(default = "default_match_sigma_floor")]
+    pub match_sigma_floor: f64,
+    /// Minimum top-1 vs top-2 raw-cosine margin (in background sigmas, both
+    /// directions) for a mutual-best pair to be a strong match instead of a
+    /// possible one. `0` disables the margin gate. Requires `background`
+    /// calibration (needs the background sigma). Not applied to split/merge.
+    #[serde(default)]
+    pub strong_min_margin_sigma: f64,
     /// All-but-the-top preprocessing: remove the corpus mean plus this many
     /// top principal directions from every vector and renormalize before
     /// semantic matching. `0` disables. Removes model anisotropy so scores
@@ -467,7 +593,12 @@ fn default_backend() -> String {
     "fastembed".to_string()
 }
 fn default_model() -> String {
-    "BGESmallENV15".to_string()
+    // CodeRankEmbed (2048-token context) is a managed model: decombine
+    // downloads + verifies its ONNX on first use. It closes the 5-13% silent
+    // truncation hole BGE's 512 cap opened on heavy codebases (see
+    // EXPERIMENTS.md 2026-07-08). BGESmallENV15 stays selectable as the
+    // lightweight, no-download option.
+    "CodeRankEmbed".to_string()
 }
 fn default_batch_size() -> usize {
     256
@@ -500,14 +631,19 @@ fn default_true() -> bool {
 fn default_retention() -> RetentionMode {
     RetentionMode::Report
 }
+// Duplicate thresholds are ported to CodeRankEmbed's cosine scale (the new
+// default model). Raw cosine thresholds do not transfer across models; these
+// match the BGE defaults by background-relative position (altium backgrounds:
+// BGE 0.698, CodeRank 0.261) — BGE 0.88/0.92/0.94 ≈ CodeRank 0.70/0.81/0.85.
+// See CLAUDE.md and EXPERIMENTS.md.
 fn default_candidate_threshold() -> f64 {
-    0.88
+    0.70
 }
 fn default_similarity_threshold() -> f64 {
-    0.92
+    0.81
 }
 fn default_rerank_threshold() -> f64 {
-    0.94
+    0.85
 }
 fn default_block_size() -> usize {
     1000
@@ -547,6 +683,30 @@ fn default_calibration() -> String {
 }
 fn default_calibration_sample_pairs() -> usize {
     4096
+}
+fn default_calibration_anchor() -> String {
+    // Robust superset: with enough same-name anchors it uses max(top1_p95,
+    // same_name); otherwise it is exactly top1_p95.
+    "hybrid".to_string()
+}
+fn default_min_same_name_anchors() -> usize {
+    3
+}
+fn default_candidate_sigma_floor() -> f64 {
+    // Gentle recall/noise guard. Measured 2026-07-08: on the high-overlap
+    // altium rebuild pair, 3σ over-culled real candidates (possible 56→20,
+    // missing 7→46) while 2σ recovered most of it (possible 43, missing 23)
+    // with strong matches unchanged (candidate floor never affects the
+    // match-gated strong class). The match floor below is the precision lever.
+    2.0
+}
+fn default_match_sigma_floor() -> f64 {
+    // Precision lever. Measured 2026-07-08: on the low-overlap cadabra pair the
+    // top1_p95 anchor collapses to 0.72 and the position-mapped match bar sinks
+    // to 0.55, which classifies the known false positive face_count↔counts as
+    // strong; bg + 4σ raises the bar to 0.665 and demotes it to possible while
+    // the true probes (vector_to, length) stay covered.
+    4.0
 }
 fn default_comparison_candidate_threshold() -> f64 {
     0.78
@@ -721,6 +881,12 @@ impl Config {
             if e.quantized {
                 return Err(ConfigError::CustomQuantizedUnsupported);
             }
+        } else if managed_model(&e.model).is_some() {
+            // Managed models are fp32 ONNX exports loaded via the custom path;
+            // the catalog quantized flag has no meaning for them.
+            if e.quantized {
+                return Err(ConfigError::CustomQuantizedUnsupported);
+            }
         } else {
             let Some((_, _, has_quantized)) = SUPPORTED_MODELS
                 .iter()
@@ -853,6 +1019,31 @@ impl Config {
         if c.abtt_directions > 64 {
             return Err(ConfigError::BadComparisonAbttDirections(c.abtt_directions));
         }
+        if !matches!(
+            c.calibration_anchor.as_str(),
+            "top1_p95" | "same_name" | "hybrid"
+        ) {
+            return Err(ConfigError::BadComparisonAnchor(
+                c.calibration_anchor.clone(),
+            ));
+        }
+        if !(1..=100_000).contains(&c.min_same_name_anchors) {
+            return Err(ConfigError::BadComparisonMinSameNameAnchors(
+                c.min_same_name_anchors,
+            ));
+        }
+        let sigma_ok = |v: f64| v.is_finite() && (0.0..=100.0).contains(&v);
+        if !sigma_ok(c.candidate_sigma_floor)
+            || !sigma_ok(c.match_sigma_floor)
+            || !sigma_ok(c.strong_min_margin_sigma)
+            || c.candidate_sigma_floor > c.match_sigma_floor
+        {
+            return Err(ConfigError::BadComparisonSigma {
+                candidate: c.candidate_sigma_floor,
+                match_floor: c.match_sigma_floor,
+                margin: c.strong_min_margin_sigma,
+            });
+        }
         // Labels are optional in the file (they can come from the command
         // line), but when set they must name distinct configured projects.
         let labels: HashSet<String> = self
@@ -910,7 +1101,10 @@ languages:
 
 embedding:
   backend: fastembed
-  model: BGESmallENV15
+  # CodeRankEmbed (2048-token context) is downloaded + hash-verified on first
+  # use (~550 MB). For a lightweight, no-download run set model: BGESmallENV15
+  # (512-token context; truncates ~5-13% of units on heavy codebases).
+  model: CodeRankEmbed
   # cache_dir: /absolute/path/to/decombine/models
   batch_size: 256
   max_batch_chars: 200000
@@ -930,9 +1124,11 @@ index:
   retention: report # full | report | minimal
 
 analysis:
-  candidate_threshold: 0.88
-  similarity_threshold: 0.92
-  rerank_threshold: 0.94
+  # Ported to CodeRankEmbed's cosine scale; raise all three for BGESmallENV15
+  # (its BGE defaults were 0.88 / 0.92 / 0.94).
+  candidate_threshold: 0.70
+  similarity_threshold: 0.81
+  rerank_threshold: 0.85
   block_size: 1000
   body_node_count_threshold: 10
   min_semantic_body_node_count: 20
@@ -952,8 +1148,18 @@ analysis:
 # comparison:
 #   left: v1
 #   right: v2
+#   # Raw thresholds below are BGE-scale. On CodeRankEmbed (the default) set
+#   # `calibration: background` so they auto-rescale to the model's cosine
+#   # range instead of hand-porting them.
+#   calibration: background
 #   candidate_threshold: 0.78
 #   match_threshold: 0.86
+#   # Robust-calibration knobs (used when calibration: background):
+#   calibration_anchor: hybrid   # top1_p95 | same_name | hybrid
+#   min_same_name_anchors: 3
+#   candidate_sigma_floor: 2.0   # effective candidate >= bg + k*sigma (recall guard)
+#   match_sigma_floor: 4.0       # effective match >= bg + k*sigma (precision lever)
+#   strong_min_margin_sigma: 0.0 # >0 gates strong matches on top1-top2 margin
 #   top_k_per_unit: 5
 #   min_body_node_count: 0
 #   max_right_candidate_fanout: 0 # 0 disables semantic-magnet suppression
@@ -1174,6 +1380,24 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ConfigError::BadBatchSize(0))
+        ));
+    }
+
+    #[test]
+    fn managed_model_is_valid_without_custom_block() {
+        let dir = tempdir();
+        // The default model is now a managed model with no `custom` block.
+        let mut config = base_config(dir.path());
+        assert_eq!(config.embedding.model, "CodeRankEmbed");
+        assert!(managed_model(&config.embedding.model).is_some());
+        config.validate().unwrap();
+        assert_eq!(config.embedding.dimensions(), 768);
+
+        // Catalog quantization is meaningless for a managed fp32 export.
+        config.embedding.quantized = true;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::CustomQuantizedUnsupported)
         ));
     }
 

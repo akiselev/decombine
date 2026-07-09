@@ -1,8 +1,23 @@
 # Agent Query Interface Research
 
-Date: 2026-07-08
+Date: 2026-07-08 (scope decisions recorded 2026-07-09)
 
-Status: research synthesis. No implementation has started.
+Status: research synthesis, reviewed and descoped. No implementation has
+started.
+
+Scope decisions (2026-07-09, see Decisions at the bottom):
+
+- Build the embeddings-native core only: JSON output for existing analyzers,
+  then `capabilities`/`inspect`/`units`, then `similar`/`search`/`qbe`.
+- Text/AST search, tree-sitter query files, and YAML query packs are cut:
+  agents already have ripgrep and ast-grep; decombine's unique asset is
+  embeddings and its analyzers. The sections below are kept as reference
+  research, not as a plan.
+- Default output is human-readable text; `--json`/`--jsonl` are opt-in flags.
+- Pagination is `--limit` plus an `exhaustive` flag only. No cursor protocol.
+- Explanations are inline per result behind `--why`. No persisted query runs,
+  no `explain result:<id>`.
+- CLI JSON is the only agent surface. MCP is explicitly out of scope.
 
 ## Question
 
@@ -17,7 +32,9 @@ exploration features.
 Short answer: build a typed query pipeline with JSON/JSONL as the stable
 contract. Do not make agents scrape Markdown. Do not start with one giant query
 language. Start with a small family of explicit commands, stable selectors,
-explainable result objects, and bounded/paginated output.
+explainable result objects, and bounded output. Only build what nothing else
+on the agent's box can do: everything rides on decombine's embeddings and
+analyzer outputs, not on lexical or structural search.
 
 ## Method
 
@@ -101,13 +118,15 @@ decombine init
 decombine show-config
 decombine index [--project]
 decombine embed
+decombine tokens
 decombine analyze [duplicates|concerns]
 decombine compare [--left --right]
 decombine run
 decombine languages list
 decombine models list
 decombine models download
-decombine doctor
+decombine doctor [--provider]
+decombine drift [--baseline --candidate ...]
 ```
 
 Implemented analysis algorithms:
@@ -166,39 +185,47 @@ analysis_artifacts
 - model identity;
 - normalized vectors.
 
-Main gaps:
+Main gaps (in scope):
 
 - no `query`, `search`, `inspect`, `qbe`, or JSON-output command;
 - reports are Markdown-only and brittle for agents to parse;
-- `analysis_artifacts` exists but is not used for structured outputs;
 - no stable unit selector syntax;
-- no lexical/BM25 search layer;
 - no score-explanation schema;
-- no pagination/cursor protocol;
-- no reusable query/session state;
+- no result limiting with an explicit exhaustiveness signal;
 - no `capabilities` command to tell agents what is indexed.
+
+Non-gaps (deliberately not built): lexical/BM25 search, cursor pagination,
+reusable query/session state. Agents bring ripgrep for lexical search;
+re-running a local query with a bigger `--limit` costs milliseconds.
 
 ## Design Principles
 
 ## 1. Do Not Build One Magic Query Language First
 
-The best shape is a typed query family:
+The best shape is a typed query family. In scope:
 
 ```text
-text      literal/regex/token search
-ast       Tree-sitter/ast-grep structural search
-units     metadata/fact-table filtering
-similar   vector neighbors and semantic search
-qbe       query by example
-graph     neighborhood expansion over edges
-report    structured duplicate/concern/compare results
-explain   why this result matched/ranked
-schema    machine-readable schemas
+units        metadata/fact-table filtering
+inspect      resolve a selector, return unit metadata and source
+similar      vector neighbors of an indexed unit
+search       semantic search from a natural-language query
+qbe          query by example
+report       structured duplicate/concern/compare results (via --json)
 capabilities what this DB can answer
 ```
 
-Each command should have a clear contract. A query-pack format can compose them
-later.
+Cut (agents already have better tools for these; revisit only on demonstrated
+need):
+
+```text
+text      literal/regex/token search        -> ripgrep
+ast       structural search                  -> ast-grep / tree-sitter CLI
+packs     YAML multi-signal query packs      -> untested ranking, no consumer
+graph     edge expansion                     -> cheap later add-on over
+                                                existing cluster/compare data
+```
+
+Each command should have a clear contract.
 
 ## 2. Machine Output Is the Product for Agents
 
@@ -211,7 +238,7 @@ Human reports can stay Markdown. Agents need:
 - deterministic ordering;
 - byte ranges;
 - result explanations;
-- pagination;
+- result bounding (`--limit` + exhaustiveness reporting);
 - skipped-file and non-exhaustive-result metadata.
 
 Never require agents to parse Markdown tables.
@@ -226,10 +253,14 @@ stderr = progress, warnings, diagnostics
 ```
 
 This matches the existing decombine habit of sending compare progress to
-stderr. Keep that boundary and make it explicit:
+stderr. Keep that boundary and make it explicit.
+
+Default output is human-readable text (which agents can read too). Machine
+output is opt-in via flags, not an `--output` enum:
 
 ```text
---output text|json|jsonl
+--json     bounded JSON envelope on stdout
+--jsonl    JSONL event stream on stdout (large/streaming result sets)
 --progress text|jsonl|none
 ```
 
@@ -237,8 +268,11 @@ JSONL progress should go to stderr.
 
 ## 4. Stable Selectors Beat Line Numbers
 
-Line numbers alone are not stable. Agents need selectors that can survive small
-edits and resolve ambiguity:
+Line numbers alone are not stable. What we can honestly promise: IDs that are
+deterministic across re-runs of the same index generation. IDs include byte
+ranges and the body hash, so any edit to a unit changes its ID — that is by
+design; "survives edits" would require a fuzzy re-anchoring subsystem we are
+not building. Agents re-resolve after re-indexing:
 
 ```json
 {
@@ -270,41 +304,27 @@ Selector layers:
 - parent/scope chain;
 - AST hash later.
 
-Add:
-
-```text
-decombine query resolve <selector> --json
-```
-
-Resolution states:
-
-```text
-exact
-moved
-ambiguous
-missing
-stale_index
-```
+Deferred: a `query resolve <selector>` command with `exact/moved/ambiguous/
+missing/stale_index` states is a fuzzy re-anchoring subsystem hiding in one
+command. `query inspect` returning `found`/`missing` against the current index
+is enough; agents that hold IDs across edits re-index and re-query.
 
 ## 5. Every Result Needs a Why
 
-For an agent, a raw score is not enough. Each result should explain:
+For an agent, a raw score is not enough. With `--why`, each result should
+carry inline:
 
-- which retrieval sources matched;
 - score components;
 - filters applied;
 - thresholds;
-- nearest examples/neighbors;
 - suppression/downrank reasons;
 - whether the result set is exhaustive;
 - whether the index is stale.
 
-Keep normal results compact and support:
-
-```text
-decombine query explain result:<id> --json
-decombine query explain --plan query.yaml --json
-```
+Explanations are stateless and inline. There is no `explain result:<id>`
+command: it would require persisting query runs (statefulness, GC concerns)
+for something `--why` provides at query time. `query inspect unit:<id>` covers
+after-the-fact digging because units, unlike transient results, live in the DB.
 
 ## Proposed Command Surface
 
@@ -313,10 +333,10 @@ decombine query explain --plan query.yaml --json
 Before a broad query system, add machine output for existing analyzers:
 
 ```sh
-decombine compare --output json --limit 100
-decombine compare --output jsonl --progress jsonl
-decombine analyze duplicates --output json
-decombine analyze concerns --output json
+decombine compare --json --limit 100
+decombine compare --jsonl --progress jsonl
+decombine analyze duplicates --json
+decombine analyze concerns --json
 decombine schema compare --schema-version 1
 ```
 
@@ -326,10 +346,11 @@ commands can reuse.
 Highest-value first implementation:
 
 ```sh
-decombine compare --output json \
-  --limit 100 \
-  --fields match_id,class,score,left,right
+decombine compare --json --limit 100
 ```
+
+(No `--fields` projection: every agent has jq; column selection is not worth
+the surface area.)
 
 Reasons:
 
@@ -337,7 +358,7 @@ Reasons:
 - agents need it for rewrite/reimplementation reviews;
 - scores, hints, calibration, ABTT, and fanout suppression are important to
   expose;
-- it exercises stable IDs and pagination.
+- it exercises stable IDs and result bounding.
 
 ## Phase 1: Read-Only Query Commands
 
@@ -345,7 +366,6 @@ Reasons:
 decombine query capabilities --json
 decombine query units --where 'language=rust kind=function path=src/**' --json
 decombine query inspect unit:<id> --json
-decombine query text 'ComparisonConfig' --path 'src/**/*.rs' --jsonl
 decombine query similar --unit unit:<id> --limit 20 --json
 decombine query search --text "retry backoff timeout" --limit 50 --json
 decombine query qbe --unit unit:<id> --neighbors 50 --why --json
@@ -367,7 +387,11 @@ decombine query qbe --unit unit:<id> --neighbors 50 --why --json
 - symbol/call graph availability when added;
 - index staleness/dirty worktree status.
 
-## Phase 2: Structural and Fact Queries
+## Phase 2: Structural and Fact Queries (CUT except `query facts`-style filters)
+
+Cut 2026-07-09: structural search duplicates ast-grep/tree-sitter CLI, which
+agents already have. The metadata-filter half survives as `query units
+--where`. Kept below as reference only.
 
 ```sh
 decombine query ast \
@@ -404,7 +428,12 @@ AST result evidence should include captures:
 }
 ```
 
-## Phase 3: Query Packs
+## Phase 3: Query Packs (CUT)
+
+Cut 2026-07-09: multi-signal hybrid ranking rests on invented weights (the
+`0.55/0.20/0.15/0.10` combine below was never measured — any such weighting
+is an EXPERIMENTS.md experiment, not a spec), and no consumer exists. Kept as
+reference only.
 
 YAML query packs let agents run repeatable multi-signal queries:
 
@@ -460,7 +489,12 @@ Command:
 decombine query run retry-error-handling.yaml --format jsonl --limit 50
 ```
 
-## Phase 4: Graph Expansion
+## Phase 4: Graph Expansion (DEFERRED)
+
+Deferred 2026-07-09: the cheap edges (`same_file`, `similar`, `duplicate`,
+`compare_match`, `concern_hit`) all derive from data decombine already has,
+so this can land later without new infrastructure. Symbol-graph edges
+(`calls`, `references`, ...) are further out still.
 
 Agents need context expansion:
 
@@ -480,7 +514,7 @@ same_file      units in same file
 similar        vector neighbor
 duplicate      same duplicate cluster
 compare_match  comparison relation
-concern_hit     concern projection relation
+concern_hit    concern projection relation
 ```
 
 Later edge types:
@@ -536,7 +570,6 @@ For bounded results:
   "items": [],
   "page": {
     "limit": 50,
-    "next_cursor": "opaque",
     "has_more": true,
     "sort": ["-score", "unit_id"]
   }
@@ -603,29 +636,20 @@ Expose DB row IDs as debug fields, not durable selectors:
 }
 ```
 
-## Pagination and Limits
+## Limits (no cursors)
 
-Every command that can return many results should support:
+Decided 2026-07-09: no cursor protocol. Opaque cursors with query-hash and
+index-generation invalidation are hosted-API design (AIP-158); this is a local
+CLI over local SQLite where re-running with a bigger `--limit` costs
+milliseconds and is deterministic. Every command that can return many results
+supports:
 
 ```text
 --limit N
---cursor TOKEN
 --sort KEY
---fields a,b,c
 --all
 --timeout 10s
 ```
-
-Cursor contents should be opaque and include:
-
-- query hash;
-- config hash;
-- DB/index generation;
-- sort key;
-- last emitted stable ID;
-- schema version.
-
-If the user changes incompatible args, reject the cursor.
 
 Always report:
 
@@ -634,44 +658,44 @@ Always report:
   "exhaustive": false,
   "limit_hit": true,
   "timeout": false,
-  "has_more": true,
-  "next_cursor": "..."
+  "has_more": true
 }
 ```
 
+An agent that hits `has_more: true` re-runs with a larger `--limit` or `--all`.
+
 ## Explainability
 
-Every result should have compact evidence:
+Every result should have compact inline evidence when `--why` is passed
+(stateless — computed at query time, never persisted):
 
 ```json
 {
   "scores": {
     "final": 0.842,
-    "vector": 0.781,
-    "lexical": 0.66,
-    "ast": 1.0,
-    "path": 0.2
+    "cosine": 0.842,
+    "background": 0.698
   },
   "evidence": [
-    {"source": "vector", "query": "retry transient error timeout exponential backoff"},
-    {"source": "ast", "capture": "@call.name", "text": "timeout"},
-    {"source": "lexical", "term": "backoff"}
+    {"source": "vector", "query": "retry transient error timeout exponential backoff"}
   ],
   "decision": {
-    "reason": "hybrid_rank",
+    "reason": "vector_rank",
     "filters": ["language=rust", "path=src/**"],
     "suppressed": false
   }
 }
 ```
 
-Then allow deeper inspection:
+Then allow deeper inspection of things that live in the DB (units, not
+transient results):
 
 ```sh
-decombine query explain result:<id> --json
 decombine query explain unit:<id> --neighbors vector,cluster,compare --json
-decombine query skipped --run query-run:<id> --jsonl
 ```
+
+Skipped files are reported inline in the summary/JSONL events of the run that
+skipped them, not via a separate command over a persisted run.
 
 ## Schema Command
 
@@ -715,7 +739,7 @@ decombine query search \
   --text "retry backoff timeout transient error" \
   --where 'language=rust path=src/** kind=function' \
   --limit 20 \
-  --output json
+  --json
 ```
 
 Agent reads top results, then expands one:
@@ -727,28 +751,20 @@ decombine query graph --from unit:<id> --edges similar,cluster,same_file --depth
 ## Audit a Rewrite
 
 ```sh
-decombine compare --left old --right new --output json --limit 100
-decombine query explain match:<id> --json
+decombine compare --left old --right new --json --limit 100 --why
 decombine query inspect unit:<left-id> --source --json
 decombine query inspect unit:<right-id> --source --json
 ```
 
-## Explore Naming Consistency
+## Find Twins of a Known Unit (QBE)
 
 ```sh
-decombine query run docs/queries/name-divergence.yaml --output jsonl
-decombine query explain result:<id> --json
+decombine query qbe --unit unit:<id> --neighbors 50 --why --json
+decombine query similar --unit unit:<candidate-id> --limit 10 --json
 ```
 
-## Find Structural Patterns
-
-```sh
-decombine query ast \
-  --lang rust \
-  --pattern 'if let Err($E) = $X { $$$BODY }' \
-  --where 'path=src/**' \
-  --output jsonl
-```
+(Structural-pattern and query-pack examples removed with the Phase 2/3 cut;
+agents use ast-grep/ripgrep directly for those.)
 
 ## Fact Model
 
@@ -814,9 +830,8 @@ The JSON serializers should be tested with golden fixtures just like Markdown.
 Implement:
 
 ```text
---output text|json
+--json (default output stays human-readable text)
 --limit
---fields
 stable unit IDs
 stable match/cluster IDs
 schema_version
@@ -848,19 +863,16 @@ decombine query qbe --unit ...
 
 Reuse `ConcernAnalyzer` query embedding and `VectorStore` top-k search.
 
-### Step 4: Query Packs
+### Step 4 (deferred): Graph Expansion
 
-Implement YAML query packs that combine lexical, vector, metadata, and AST
-retrieval.
+Expose `same_file`, `similar`, `duplicate`, `compare_match`, `concern_hit`
+edges over data decombine already computes. Only after Steps 1–3 have real
+agent usage.
 
-### Step 5: Structural Search
+### Cut: Query Packs, Structural Search, Symbol Graph
 
-Expose Tree-sitter query files first, then consider ast-grep-like friendly
-patterns.
-
-### Step 6: Symbol Graph Enrichment
-
-Add optional LSP/SCIP/LSIF-style facts after the core query interface is stable.
+Cut 2026-07-09 (see Decisions). Revisit only on demonstrated need from agent
+usage of Steps 1–3.
 
 ## Guardrails
 
@@ -878,16 +890,34 @@ Add optional LSP/SCIP/LSIF-style facts after the core query interface is stable.
 
 ## Decisions
 
+Original synthesis (2026-07-08), revised after review (2026-07-09):
+
 1. Build an agent-oriented interface as a typed query family, not a single DSL.
 2. Add JSON for existing analyzers before building new query algorithms.
-3. Make JSON/JSONL schema versions, stable IDs, pagination, and explainability
-   non-negotiable.
-4. Keep Markdown reports for humans, but never make agents scrape them.
+3. Make JSON/JSONL schema versions, stable IDs, `--limit`/`exhaustive`
+   bounding, and explainability non-negotiable.
+4. Keep human-readable text as the default output for every command (agents
+   read it fine); `--json`/`--jsonl` are opt-in flags, not an output enum.
+   Markdown reports stay for humans, but agents never scrape them.
 5. Expose `query capabilities` and `query inspect` early; agents need
    orientation more than clever ranking.
-6. Use hybrid retrieval by default for exploratory search.
-7. Add symbol/reference/call graph facts later, after the stable result
-   contract exists.
+6. Scope is the embeddings-native core only: JSON for analyzers →
+   capabilities/inspect/units → similar/search/qbe. Text/AST search,
+   tree-sitter query files, and YAML query packs are cut — agents already
+   have ripgrep/ast-grep, and the proposed hybrid ranking weights were never
+   measured. Any future hybrid retrieval is an EXPERIMENTS.md experiment
+   first.
+7. No cursor pagination: `--limit` plus honest `exhaustive`/`has_more`
+   reporting; re-running locally is cheap.
+8. Explanations are inline via `--why`, stateless. No persisted query runs,
+   no `explain result:<id>`; `explain unit:<id>` is fine because units live
+   in the DB.
+9. Unit IDs are deterministic per index generation, not edit-surviving; no
+   fuzzy `resolve` subsystem.
+10. MCP is explicitly out of scope. The CLI is the agent surface; agents use
+    it directly from their shell.
+11. Graph expansion over existing cluster/compare/concern data is deferred,
+    not cut; symbol/reference/call graph facts come later still, if ever.
 
 ## Related Files
 

@@ -2,7 +2,7 @@
 pub mod fastembed_backend;
 pub mod hash;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 
@@ -29,6 +29,13 @@ pub trait Embedder {
     /// in padded area (Go worst), which is exactly the margin by which
     /// embed runs overshot the token-area memory budget.
     fn count_tokens(&self, _text: &str) -> Option<usize> {
+        None
+    }
+    /// True token count with truncation disabled. `count_tokens` clamps at
+    /// the model's truncation length (fastembed configures truncation on the
+    /// inference tokenizer), which hides how far over the cap an input runs;
+    /// this reveals the severity a capped model would silently drop.
+    fn count_tokens_untruncated(&self, _text: &str) -> Option<usize> {
         None
     }
     fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
@@ -146,6 +153,29 @@ impl TokenStats {
             count += 1;
         }
         self.padded_positions += count * longest as u64;
+    }
+
+    /// Record one input's true (untruncated) token length for distribution
+    /// reporting. Unlike `record_batch` this tracks no padding — the input is
+    /// being measured, not batched — so `padding_waste`/`truncated` stay 0 and
+    /// over-cap counts come from `over` instead.
+    pub fn record_length(&mut self, tokens: usize) {
+        self.lengths.push(tokens);
+        self.token_positions += tokens as u64;
+    }
+
+    /// Fold another distribution into this one (for an all-languages total).
+    pub fn merge(&mut self, other: &TokenStats) {
+        self.lengths.extend_from_slice(&other.lengths);
+        self.truncated += other.truncated;
+        self.token_positions += other.token_positions;
+        self.padded_positions += other.padded_positions;
+    }
+
+    /// Inputs strictly longer than `threshold` tokens — the content a model
+    /// capped at `threshold` would silently drop.
+    pub fn over(&self, threshold: usize) -> usize {
+        self.lengths.iter().filter(|&&t| t > threshold).count()
     }
 
     pub fn percentile(&self, q: f64) -> usize {
@@ -302,6 +332,59 @@ pub fn embed_pending_with_progress(
 /// The model row this config maps to, if embeddings exist already.
 pub fn existing_model_id(db: &Db, identity: &ModelIdentity) -> Result<ModelId> {
     db.find_or_create_model(identity)
+}
+
+/// One language's untruncated token-length distribution.
+#[derive(Debug, Clone)]
+pub struct LanguageTokens {
+    pub language: String,
+    pub stats: TokenStats,
+}
+
+/// Measure the true (untruncated) token-length distribution of every indexed
+/// unit body, bucketed by language, using the model's own tokenizer. Unlike
+/// the embed-time stats this scans all units regardless of embedding state
+/// (so it works on already-embedded DBs) and recovers text from source under
+/// report/minimal retention. Units whose text cannot be recovered, or whose
+/// backend cannot count tokens, are skipped.
+pub fn token_report(
+    db: &Db,
+    config: &Config,
+    embedder: &dyn Embedder,
+) -> Result<Vec<LanguageTokens>> {
+    let rows = db.all_unit_texts()?;
+    let missing: Vec<String> = rows
+        .iter()
+        .filter(|(_, _, text)| text.is_none())
+        .map(|(hash, _, _)| hash.clone())
+        .collect();
+    let recovered = if missing.is_empty() {
+        HashMap::new()
+    } else {
+        recover_texts_from_source(db, config, &missing)?
+    };
+
+    let mut by_language: BTreeMap<String, TokenStats> = BTreeMap::new();
+    for (hash, language, text) in rows {
+        let text = match text {
+            Some(text) => text,
+            None => match recovered.get(&hash) {
+                Some(text) => text.clone(),
+                None => continue,
+            },
+        };
+        let Some(tokens) = embedder.count_tokens_untruncated(&text) else {
+            continue;
+        };
+        by_language
+            .entry(language)
+            .or_default()
+            .record_length(tokens);
+    }
+    Ok(by_language
+        .into_iter()
+        .map(|(language, stats)| LanguageTokens { language, stats })
+        .collect())
 }
 
 /// Rough tokens for a code body: ~4 chars/token, clamped to what the model
@@ -479,6 +562,26 @@ mod tests {
         assert_eq!(stats.token_positions, 1200);
         assert_eq!(stats.padded_positions, 1700);
         assert!((stats.padding_waste() - (1.0 - 1200.0 / 1700.0)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn record_length_over_and_merge() {
+        let mut a = TokenStats::default();
+        for len in [100usize, 600, 2100, 300] {
+            a.record_length(len);
+        }
+        assert_eq!(a.count(), 4);
+        assert_eq!(a.max(), 2100);
+        assert_eq!(a.over(512), 2, "600 and 2100 exceed 512");
+        assert_eq!(a.over(2048), 1, "only 2100 exceeds 2048");
+        // record_length tracks no padding, so waste stays zero.
+        assert_eq!(a.padding_waste(), 0.0);
+
+        let mut b = TokenStats::default();
+        b.record_length(700);
+        a.merge(&b);
+        assert_eq!(a.count(), 5);
+        assert_eq!(a.over(512), 3);
     }
 
     #[test]

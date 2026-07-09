@@ -88,7 +88,13 @@ fn ctx(
 }
 
 fn analysis_config() -> AnalysisConfig {
-    serde_yaml::from_str("{}").unwrap()
+    // Pinned to the historical BGE-scale duplicate thresholds so these
+    // hash-backend tests stay valid independent of the product default (now
+    // CodeRank scale); the assertions below are tuned to 0.92/0.94.
+    serde_yaml::from_str(
+        "candidate_threshold: 0.88\nsimilarity_threshold: 0.92\nrerank_threshold: 0.94\n",
+    )
+    .unwrap()
 }
 
 fn run_duplicates(ctx: &AnalysisContext) -> decombine::analyze::duplicate::DuplicateReport {
@@ -771,6 +777,11 @@ fn comparison_background_calibration_rescales_thresholds() {
 
     let mut config = comparison_config();
     config.calibration = "background".into();
+    // This 4-pair synthetic background is bimodal (half the sampled pairs are
+    // the true matches at 0.8), so its sigma is meaningless; disable the sigma
+    // floors to test the position mapping in isolation.
+    config.candidate_sigma_floor = 0.0;
+    config.match_sigma_floor = 0.0;
     let calibrated = CompareAnalyzer {
         left_label: "v1".into(),
         right_label: "v2".into(),
@@ -784,6 +795,7 @@ fn comparison_background_calibration_rescales_thresholds() {
     assert_eq!(cal.sampled_pairs, 4);
     assert!((cal.background_mean - 0.4).abs() < 1e-4);
     assert!((cal.top1_anchor - 0.8).abs() < 1e-4);
+    assert_eq!(cal.anchor_source, "top1_p95");
     assert!((cal.effective_match_threshold - 0.744).abs() < 1e-3);
 }
 
@@ -880,6 +892,148 @@ fn comparison_calibration_falls_back_on_narrow_range() {
     assert!((cal.effective_match_threshold - 0.86).abs() < 1e-4);
     // The identical pair still matches strongly under raw thresholds.
     assert_eq!(report.count(MatchClass::StrongMatch), 1);
+}
+
+#[test]
+fn comparison_same_name_anchor_is_used_and_ignores_ambiguous_names() {
+    // Three unambiguous same-name/same-kind cross-project pairs anchor the
+    // scale; a name appearing twice on the left is ambiguous and excluded.
+    let units = vec![
+        unit("v1", "src/a.rs", "foo", None, "h1", 10),
+        unit("v1", "src/b.rs", "bar", None, "h2", 10),
+        unit("v1", "src/c.rs", "baz", None, "h3", 10),
+        unit("v1", "src/d.rs", "dup", None, "h4", 10),
+        unit("v1", "src/e.rs", "dup", None, "h5", 10),
+        unit("v2", "lib/a.rs", "foo", None, "h6", 10),
+        unit("v2", "lib/b.rs", "bar", None, "h7", 10),
+        unit("v2", "lib/c.rs", "baz", None, "h8", 10),
+        unit("v2", "lib/d.rs", "dup", None, "h9", 10),
+    ];
+    // Each named pair sits at cosine 0.9 (dim 4); the ambiguous "dup" units
+    // share a vector so the name maps to two left units and is excluded.
+    let vectors = vec![
+        Some(vec![1.0, 0.0, 0.0, 0.0]),   // foo L
+        Some(vec![0.0, 1.0, 0.0, 0.0]),   // bar L
+        Some(vec![0.0, 0.0, 1.0, 0.0]),   // baz L
+        Some(vec![0.0, 0.0, 0.0, 1.0]),   // dup L1
+        Some(vec![0.0, 0.0, 0.0, 1.0]),   // dup L2
+        Some(vec![0.9, 0.436, 0.0, 0.0]), // foo R (cos 0.9)
+        Some(vec![0.436, 0.9, 0.0, 0.0]), // bar R (cos 0.9)
+        Some(vec![0.0, 0.0, 0.9, 0.436]), // baz R (cos 0.9)
+        Some(vec![0.0, 0.0, 0.436, 0.9]), // dup R (cos 0.9, but ambiguous)
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+
+    let mut config = comparison_config();
+    config.calibration = "background".into();
+    config.calibration_anchor = "same_name".into();
+    config.candidate_sigma_floor = 0.0;
+    config.match_sigma_floor = 0.0;
+    let report = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+    let cal = report.calibration.as_ref().unwrap();
+    assert_eq!(cal.anchor_source, "same_name");
+    assert_eq!(cal.same_name_count, 3, "dup pair is ambiguous and excluded");
+    assert!((cal.same_name_anchor.unwrap() - 0.9).abs() < 1e-3);
+    assert!((cal.effective_anchor - 0.9).abs() < 1e-3);
+}
+
+#[test]
+fn comparison_sigma_floor_tightens_effective_thresholds() {
+    // Same compressed-scale corpus as the rescale test (bg mean 0.4, std 0.4,
+    // anchor 0.8), but with sigma floors that sit above the position-mapped
+    // thresholds. The floors clamp both up and kill the calibrated matches.
+    let units = vec![
+        unit("v1", "src/a.rs", "alpha", None, "h1", 10),
+        unit("v1", "src/b.rs", "beta", None, "h2", 10),
+        unit("v2", "lib/c.rs", "gamma", None, "h3", 10),
+        unit("v2", "lib/d.rs", "delta", None, "h4", 10),
+    ];
+    let vectors = vec![
+        Some(vec![1.0, 0.0, 0.0, 0.0]),
+        Some(vec![0.0, 0.0, 1.0, 0.0]),
+        Some(vec![0.8, 0.6, 0.0, 0.0]),
+        Some(vec![0.0, 0.0, 0.8, 0.6]),
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+    let mut config = comparison_config();
+    config.calibration = "background".into();
+    config.candidate_sigma_floor = 2.0; // floor 0.4 + 2*0.4 = 1.2
+    config.match_sigma_floor = 3.0; // floor 0.4 + 3*0.4 = 1.6
+    let report = CompareAnalyzer {
+        left_label: "v1".into(),
+        right_label: "v2".into(),
+    }
+    .run(&context, &config)
+    .unwrap();
+    let cal = report.calibration.as_ref().unwrap();
+    assert!(cal.applied);
+    assert!(cal.candidate_floored && cal.match_floored);
+    assert!((cal.effective_candidate_threshold - 1.2).abs() < 1e-3);
+    assert!((cal.effective_match_threshold - 1.6).abs() < 1e-3);
+    // The 0.8-cosine pairs no longer clear the floored match threshold.
+    assert_eq!(report.count(MatchClass::StrongMatch), 0);
+}
+
+#[test]
+fn comparison_margin_gate_demotes_near_ties() {
+    // A ↔ B is a lone-candidate pair (infinite margin); C ↔ D is a mutual best
+    // with a close runner-up (C also sees E at 0.885). With the margin gate on,
+    // C ↔ D drops to a possible match while A ↔ B stays strong.
+    let units = vec![
+        unit("v1", "src/a.rs", "alpha", None, "h1", 10), // A -> B, lone
+        unit("v1", "src/c.rs", "gamma", None, "h2", 10), // C -> D (tie with E)
+        unit("v1", "src/g.rs", "iota", None, "h3", 10),  // G -> E
+        unit("v2", "lib/b.rs", "beta", None, "h4", 10),  // B
+        unit("v2", "lib/d.rs", "delta", None, "h5", 10), // D
+        unit("v2", "lib/e.rs", "eps", None, "h6", 10),   // E
+    ];
+    let vectors = vec![
+        Some(vec![1.0, 0.0, 0.0, 0.0]),      // A
+        Some(vec![0.0, 1.0, 0.0, 0.0]),      // C
+        Some(vec![0.0, 0.885, 0.0, 0.4657]), // G (≈ E direction)
+        Some(vec![0.99, 0.0, 0.141, 0.0]),   // B: A·B=0.99
+        Some(vec![0.0, 0.9, 0.436, 0.0]),    // D: C·D=0.9, G·D=0.796
+        Some(vec![0.0, 0.885, 0.0, 0.4657]), // E: C·E=0.885, G·E=1.0
+    ];
+    let context = ctx(units, vectors, &["v1", "v2"]);
+    let mut config = comparison_config();
+    config.calibration = "background".into();
+    config.candidate_threshold = 0.3; // permissive positions so ties are edges
+    config.match_threshold = 0.5;
+    config.candidate_sigma_floor = 0.0;
+    config.match_sigma_floor = 0.0;
+    config.use_name_hints = false;
+    config.use_path_hints = false;
+
+    let run = |margin: f64| {
+        let mut c = config.clone();
+        c.strong_min_margin_sigma = margin;
+        CompareAnalyzer {
+            left_label: "v1".into(),
+            right_label: "v2".into(),
+        }
+        .run(&context, &c)
+        .unwrap()
+    };
+    let is_strong = |r: &decombine::analyze::compare::ComparisonReport, l: usize, rt: usize| {
+        r.matches
+            .iter()
+            .any(|m| m.class == MatchClass::StrongMatch && m.left == [l] && m.right == [rt])
+    };
+
+    let no_gate = run(0.0);
+    assert!(is_strong(&no_gate, 0, 3), "A↔B strong without gate");
+    assert!(is_strong(&no_gate, 1, 4), "C↔D strong without gate");
+
+    let gated = run(100.0);
+    assert!(is_strong(&gated, 0, 3), "A↔B stays strong (lone candidate)");
+    assert!(!is_strong(&gated, 1, 4), "C↔D demoted by the margin gate");
+    assert!(gated.count(MatchClass::StrongMatch) < no_gate.count(MatchClass::StrongMatch));
 }
 
 #[test]

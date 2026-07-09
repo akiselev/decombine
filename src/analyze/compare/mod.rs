@@ -7,7 +7,7 @@ use anyhow::{Result, bail, ensure};
 
 use crate::analyze::context::{AnalysisContext, Analyzer, CodeUnitRef};
 use crate::analyze::paths::{directory_of, top_level_module};
-use crate::analyze::vector_store::VectorStore;
+use crate::analyze::vector_store::{ScoredPair, VectorStore};
 use crate::config::ComparisonConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,15 +64,33 @@ pub struct SuppressedCandidate {
 }
 
 /// Result of mapping normalized threshold positions into this run's raw
-/// cosine scale. Background similarity anchors 0.0; the 95th percentile of
-/// per-left-unit top-1 scores anchors 1.0.
+/// cosine scale. Background similarity anchors 0.0; the chosen anchor
+/// (`anchor_source`) anchors 1.0. Effective thresholds are then clamped to
+/// sigma floors above the background mean.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CalibrationInfo {
     pub applied: bool,
     pub sampled_pairs: usize,
     pub background_mean: f32,
     pub background_std: f32,
+    /// 95th percentile of per-left top-1 scores.
     pub top1_anchor: f32,
+    /// Median cosine of unambiguous same-name/same-kind cross-project pairs,
+    /// when at least `min_same_name_anchors` exist.
+    pub same_name_anchor: Option<f32>,
+    pub same_name_count: usize,
+    /// Which anchor was used to set the 1.0 position (`top1_p95`/`same_name`).
+    pub anchor_source: String,
+    /// The raw-cosine value at normalized position 1.0.
+    pub effective_anchor: f32,
+    /// Sigma floors in raw cosine (`bg + k*sigma`), and whether each bound.
+    pub candidate_floor: f32,
+    pub match_floor: f32,
+    pub candidate_floored: bool,
+    pub match_floored: bool,
+    /// Absolute raw-cosine margin required for a strong match
+    /// (`strong_min_margin_sigma * background_std`); 0 when the gate is off.
+    pub margin_required: f32,
     pub effective_candidate_threshold: f32,
     pub effective_match_threshold: f32,
 }
@@ -234,12 +252,25 @@ impl CompareAnalyzer {
         });
         let vectors: &VectorStore = transformed.as_ref().unwrap_or(&ctx.vectors);
 
-        let calibration = if config.calibration == "background" {
+        // Under background calibration, scan left→right unpruned once and
+        // reuse it: the top-1 anchor comes from this pass (no separate
+        // cross-product) and the candidate edges are the same pass filtered by
+        // the calibrated threshold. Filtering an unpruned top-k by a threshold
+        // yields exactly the thresholded top-k, so this changes nothing but the
+        // number of scans (3 → 2).
+        let lr_full = (config.calibration == "background").then(|| {
+            progress("scanning left→right candidates");
+            vectors.top_k_between(
+                &pending_left,
+                &pending_right,
+                config.top_k_per_unit.max(1),
+                -1.0,
+            )
+        });
+        let calibration = lr_full.as_ref().and_then(|lr| {
             progress("calibrating thresholds against background similarity");
-            calibrate(vectors, config, &pending_left, &pending_right)
-        } else {
-            None
-        };
+            calibrate(ctx, vectors, config, &pending_left, &pending_right, lr)
+        });
         let (threshold, match_threshold) = match &calibration {
             Some(cal) if cal.applied => (
                 cal.effective_candidate_threshold,
@@ -250,12 +281,22 @@ impl CompareAnalyzer {
                 config.match_threshold as f32,
             ),
         };
-        let lr = vectors.top_k_between(
-            &pending_left,
-            &pending_right,
-            config.top_k_per_unit,
-            threshold,
-        );
+        let lr = match lr_full {
+            Some(full) => full
+                .into_iter()
+                .map(|hits| {
+                    hits.into_iter()
+                        .filter(|pair| pair.score >= threshold)
+                        .collect::<Vec<_>>()
+                })
+                .collect(),
+            None => vectors.top_k_between(
+                &pending_left,
+                &pending_right,
+                config.top_k_per_unit,
+                threshold,
+            ),
+        };
         progress("building reverse candidate edges");
         let rl = vectors.top_k_between(
             &pending_right,
@@ -264,23 +305,28 @@ impl CompareAnalyzer {
             threshold,
         );
 
-        // Deduplicate edges (kept from either direction), attach hints.
+        // Deduplicate edges (kept from either direction), attach hints. The
+        // direction is known per pass — `top_k_between` guarantees `a` is the
+        // `from` unit and `b` the `to` unit — so no membership lookup is needed.
         progress("ranking candidate edges");
         let mut edges: BTreeMap<(usize, usize), Edge> = BTreeMap::new();
-        for hits in lr.iter().chain(rl.iter()) {
-            for pair in hits {
-                // top_k_between emits (from=a, to=b); normalize to (l, r).
-                let (l, r) = if pending_left.contains(&pair.a) {
-                    (pair.a, pair.b)
-                } else {
-                    (pair.b, pair.a)
-                };
+        let add_edge =
+            |edges: &mut BTreeMap<(usize, usize), Edge>, l: usize, r: usize, raw: f32| {
                 edges.entry((l, r)).or_insert_with(|| Edge {
                     left: l,
                     right: r,
-                    raw: pair.score,
+                    raw,
                     hint: hint_bonus(config, &ctx.units[l], &ctx.units[r]),
                 });
+            };
+        for hits in &lr {
+            for pair in hits {
+                add_edge(&mut edges, pair.a, pair.b, pair.score);
+            }
+        }
+        for hits in &rl {
+            for pair in hits {
+                add_edge(&mut edges, pair.b, pair.a, pair.score);
             }
         }
 
@@ -299,6 +345,45 @@ impl CompareAnalyzer {
                 best_left_for_right.insert(edge.right, *edge);
             }
         }
+        // Top-1/top-2 raw-cosine per unit in each direction, for the strong
+        // match margin gate. Computed over all candidate edges (raw scores,
+        // pre-suppression) so a near-tie between the best and second-best
+        // candidate can demote an over-confident strong match to possible.
+        let mut left_top2: HashMap<usize, (f32, f32)> = HashMap::new();
+        let mut right_top2: HashMap<usize, (f32, f32)> = HashMap::new();
+        let push_top2 = |map: &mut HashMap<usize, (f32, f32)>, key: usize, raw: f32| {
+            let slot = map
+                .entry(key)
+                .or_insert((f32::NEG_INFINITY, f32::NEG_INFINITY));
+            if raw > slot.0 {
+                slot.1 = slot.0;
+                slot.0 = raw;
+            } else if raw > slot.1 {
+                slot.1 = raw;
+            }
+        };
+        for edge in edges.values() {
+            push_top2(&mut left_top2, edge.left, edge.raw);
+            push_top2(&mut right_top2, edge.right, edge.raw);
+        }
+        // Absolute raw margin required for a strong match; 0 disables the gate
+        // (no calibration, or `strong_min_margin_sigma` = 0).
+        let margin_required = calibration
+            .as_ref()
+            .map(|c| c.margin_required)
+            .unwrap_or(0.0);
+        let margin_of = |map: &HashMap<usize, (f32, f32)>, key: usize| -> f32 {
+            map.get(&key)
+                .map(|&(best, second)| {
+                    if second.is_finite() {
+                        best - second
+                    } else {
+                        f32::INFINITY
+                    }
+                })
+                .unwrap_or(f32::INFINITY)
+        };
+
         let mut suppressed_right_candidates = Vec::new();
         if config.max_right_candidate_fanout > 0 {
             progress("suppressing high-fanout candidate targets");
@@ -403,7 +488,14 @@ impl CompareAnalyzer {
             let mutual = best_left_for_right
                 .get(&edge.right)
                 .is_some_and(|back| back.left == l);
-            if mutual && edge.raw >= match_threshold {
+            // Margin gate: a confident strong match must beat its runner-up by
+            // at least `margin_required` on both sides. Near-ties fall through
+            // to a possible match. Split/merge classes are exempt (handled
+            // above, before this loop).
+            let margin_ok = margin_required <= 0.0
+                || (margin_of(&left_top2, l) >= margin_required
+                    && margin_of(&right_top2, edge.right) >= margin_required);
+            if mutual && edge.raw >= match_threshold && margin_ok {
                 matched_left.insert(l);
                 matched_right.insert(edge.right);
                 matches.push(MatchRecord {
@@ -597,11 +689,61 @@ fn abtt_store(ctx: &AnalysisContext, m: usize) -> VectorStore {
 /// signal range and calibration falls back to the configured raw cutoffs.
 const MIN_CALIBRATION_RANGE: f32 = 0.05;
 
+/// Median cosine of unambiguous same-name/same-kind/same-language pairs across
+/// the two projects. A name that maps to exactly one pending unit on each side
+/// is a near-certain rename correspondence, so the median of these scores is a
+/// robust proxy for what a true match scores — unlike top1_p95 it does not
+/// collapse when few left units have any real counterpart. Returns the median
+/// and how many anchor pairs it summarizes.
+fn same_name_anchor(
+    ctx: &AnalysisContext,
+    vectors: &VectorStore,
+    pending_left: &[usize],
+    pending_right: &[usize],
+) -> (Option<f32>, usize) {
+    type Key<'a> = (String, &'a str, &'a str);
+    // `None` marks a key seen more than once on a side (ambiguous).
+    let unique_by_key = |units: &[usize]| {
+        let mut map: HashMap<Key, Option<usize>> = HashMap::new();
+        for &u in units {
+            let r = &ctx.units[u];
+            let key = (
+                r.name.to_lowercase(),
+                r.kind.as_str(),
+                r.language_id.as_str(),
+            );
+            map.entry(key)
+                .and_modify(|slot| *slot = None)
+                .or_insert(Some(u));
+        }
+        map
+    };
+    let left = unique_by_key(pending_left);
+    let right = unique_by_key(pending_right);
+
+    let mut scores: Vec<f32> = Vec::new();
+    for (key, left_slot) in &left {
+        let (Some(l), Some(Some(r))) = (left_slot, right.get(key)) else {
+            continue;
+        };
+        if let (Some(lr), Some(rr)) = (vectors.row_for_unit(*l), vectors.row_for_unit(*r)) {
+            scores.push(vectors.dot(lr, rr));
+        }
+    }
+    if scores.is_empty() {
+        return (None, 0);
+    }
+    scores.sort_by(f32::total_cmp);
+    (Some(scores[scores.len() / 2]), scores.len())
+}
+
 fn calibrate(
+    ctx: &AnalysisContext,
     vectors: &VectorStore,
     config: &ComparisonConfig,
     pending_left: &[usize],
     pending_right: &[usize],
+    left_top_hits: &[Vec<ScoredPair>],
 ) -> Option<CalibrationInfo> {
     let left_rows: Vec<usize> = pending_left
         .iter()
@@ -647,9 +789,9 @@ fn calibrate(
 
     // Anchor: 95th percentile of per-left-unit top-1 scores, robust to a
     // handful of outlier near-duplicates while tracking the score scale the
-    // model assigns to its best available matches.
-    let mut top1: Vec<f32> = vectors
-        .top_k_between(pending_left, pending_right, 1, -1.0)
+    // model assigns to its best available matches. The top-1 of each left unit
+    // is the first entry of the reused (unpruned) left→right scan.
+    let mut top1: Vec<f32> = left_top_hits
         .iter()
         .filter_map(|hits| hits.first().map(|pair| pair.score))
         .collect();
@@ -657,27 +799,72 @@ fn calibrate(
         return None;
     }
     top1.sort_by(f32::total_cmp);
-    let anchor = top1[((top1.len() - 1) as f32 * 0.95).round() as usize];
+    let top1_anchor = top1[((top1.len() - 1) as f32 * 0.95).round() as usize];
 
-    let range = anchor - mean;
+    // Same-name anchor, and the anchor actually used for the 1.0 position.
+    let (same_name, same_name_count) = same_name_anchor(ctx, vectors, pending_left, pending_right);
+    let same_name_trusted = same_name.filter(|_| same_name_count >= config.min_same_name_anchors);
+    let (effective_anchor, anchor_source) = match config.calibration_anchor.as_str() {
+        "same_name" => match same_name_trusted {
+            Some(a) => (a, "same_name"),
+            None => (top1_anchor, "top1_p95"),
+        },
+        "hybrid" => match same_name_trusted {
+            Some(a) if a > top1_anchor => (a, "same_name"),
+            _ => (top1_anchor, "top1_p95"),
+        },
+        // "top1_p95" (validated) and any fallthrough.
+        _ => (top1_anchor, "top1_p95"),
+    };
+
+    let range = effective_anchor - mean;
     let applied = range >= MIN_CALIBRATION_RANGE;
-    let (candidate, match_threshold) = if applied {
+
+    // Sigma floors: calibration may only ever tighten. They clamp the
+    // low-anchor pathology where the range collapses and the position-based
+    // bar sinks toward the background noise.
+    let candidate_floor = mean + config.candidate_sigma_floor as f32 * std;
+    let match_floor = mean + config.match_sigma_floor as f32 * std;
+    let (candidate, match_threshold, candidate_floored, match_floored) = if applied {
+        let base_candidate = mean + config.candidate_threshold as f32 * range;
+        let base_match = mean + config.match_threshold as f32 * range;
+        let candidate = base_candidate.max(candidate_floor);
+        // Keep candidate <= match after both are floored.
+        let match_threshold = base_match.max(match_floor).max(candidate);
         (
-            mean + config.candidate_threshold as f32 * range,
-            mean + config.match_threshold as f32 * range,
+            candidate,
+            match_threshold,
+            candidate > base_candidate,
+            match_threshold > base_match,
         )
     } else {
         (
             config.candidate_threshold as f32,
             config.match_threshold as f32,
+            false,
+            false,
         )
+    };
+    let margin_required = if applied {
+        config.strong_min_margin_sigma as f32 * std
+    } else {
+        0.0
     };
     Some(CalibrationInfo {
         applied,
         sampled_pairs: background.len(),
         background_mean: mean,
         background_std: std,
-        top1_anchor: anchor,
+        top1_anchor,
+        same_name_anchor: same_name,
+        same_name_count,
+        anchor_source: anchor_source.to_string(),
+        effective_anchor,
+        candidate_floor,
+        match_floor,
+        candidate_floored,
+        match_floored,
+        margin_required,
         effective_candidate_threshold: candidate,
         effective_match_threshold: match_threshold,
     })

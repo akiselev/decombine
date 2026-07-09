@@ -2,6 +2,7 @@ id = "rust"
 name = "Rust"
 extensions = ["rs"]
 comment_nodes = ["line_comment", "block_comment"]
+adapter = "rust"
 
 [[scopes]]
 kind = "impl_item"

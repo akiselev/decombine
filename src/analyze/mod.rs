@@ -1,6 +1,7 @@
 pub mod compare;
 pub mod concerns;
 pub mod context;
+pub mod drift;
 pub mod duplicate;
 pub mod paths;
 pub mod similarity_index;

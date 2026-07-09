@@ -238,3 +238,371 @@ Reran the full 10-run sweep on fresh DBs with the four method changes. Zero fail
 - **Chaining bound works.** Gin's 100-member multi-family `TestContext*` cluster is gone; max gin cluster is now 19 units (16 distinct bodies + exact copies). Redis's 38-member `hsetnx…` blob is a coherent 15-member hash-command family; the 35-member clusterManager blob is 16. Express's exact-copy callback walls survive intact (exact growth exempt), now readably named.
 - **Naming works**: express clusters read `it("should serve static files")`, `app.post("/")`, `before(...)`; gin closures similarly. `<anonymous>` is nearly gone from the JS/Go reports (one residual gin product cluster of Rust-style unnamed closures at #12).
 - Residuals for next iteration: (1) redis/bge RSS anomaly; (2) coderank gin peak `25.8 GB` — consider a linear activation term or lower default budget; (3) semantic-similarity FPs between two product units (redis `sentinelResetMaster` family) are untouched by sectioning, as expected; (4) ripgrep's product section is inflated by intentional-idiom families (`Flag::update`) — the cross-directory/generic-helper downrank exists but does not gate the main table.
+
+## 2026-07-08 Code-Embedding Exploration Research
+
+- Task: research future code-exploration methods now that the core duplicate detector is useful, especially whether a user-provided set of functions can define a semantic axis such as "decoder" and rank code units by projection.
+- Method: inspected local embedding/analysis architecture (`AnalysisContext`, `VectorStore`, duplicate/concern/compare analyzers, ABTT/calibration, `scripts/embedding_experiments.py`) and ran parallel online research lanes for concept axes, modern code embeddings/retrieval, and structure-aware exploration.
+- Observed result: example-derived semantic axes and hybrid retrieval are promising, but they need benchmarked precision/stability gates before becoming product features.
+- Decision: moved detailed notes to `docs/research/code-embedding-exploration.md` and kept the roadmap link to `docs/ideas/code-embedding-exploration.md`.
+- Follow-up: expanded `docs/research/code-embedding-exploration.md` into the long-form research artifact covering local architecture fit, source links, candidate algorithms, validation shields, query-by-example, hybrid retrieval, relevance feedback, topic maps, and experiment gates.
+
+## 2026-07-08 Name/Code Embedding Consistency Research
+
+- Task: research whether decombine can embed function/method names separately from whole code blocks to detect misleading names, name/function divergence, and naming inconsistencies across a codebase.
+- Method: inspected the current extraction/schema/analysis path (`extractor.rs`, `CodeUnitRef`, `code_units.name`, `scope`, `kind`, `display_source`, `embedding_text`, body-hash embeddings) and researched method-name prediction and inconsistent-method-name detection work including code2vec, code2seq, Allamanis et al. method/class naming, MNire, NameChecker, CodeT5, GraphCodeBERT, and recent empirical reassessments of inconsistent-name detection.
+- Observed result: the current full-unit embedding likely already includes the declared function name, so raw body/name comparison would be contaminated. The useful research path is multi-channel: name-only embeddings, body-with-declared-name-masked embeddings, signature/interface embeddings, lexical subtoken features, and body-neighbor name distributions.
+- Observed result: the most promising v1 analyses are repo-local and explainable: duplicate-cluster naming entropy, body-similar/name-different candidates, same-name/body-different ambiguity clusters, and neighbor-grounded rename suggestions. Direct name/body dot product can be tested, but only with language/kind/name-length/body-size calibration and injected-mismatch benchmarks.
+- Decision: documented the detailed research in `docs/research/name-code-embedding-consistency.md` and added it to `RESEARCH.md`. Recommended next experiment is a read-only prototype over existing DBs: compute name subtokens and name-only embeddings, score duplicate-cluster naming entropy plus body-neighbor name divergence, then validate on injected name swaps before reporting real functions as "naming consistency candidates".
+
+## 2026-07-08 Agent Query Interface Research
+
+- Task: research how to add a query interface to the decombine CLI so coding agents can explore indexed codebases themselves across lexical, structural, semantic, duplicate, concern, comparison, and future graph/name-analysis data.
+- Method: inspected the current CLI/analyzer/report surface (`cli.rs`, `main.rs`, `AnalysisContext`, `VectorStore`, duplicate/concern/compare analyzers, SQLite schema, Markdown reports) and ran parallel online research on agent-oriented CLI design, code intelligence query systems, and machine-readable CLI output patterns from ripgrep, jq, SQLite, Sourcegraph, CodeQL, Semgrep, Tree-sitter, ast-grep, LSP/SCIP/LSIF, OpenGrok/Hound, Qdrant, LanceDB, and Chroma.
+- Observed result: the right interface is a typed query family, not one giant DSL: `query capabilities`, `query inspect`, `query units`, `query text`, `query ast`, `query search`, `query similar`, `query qbe`, `query graph`, `query explain`, plus later query packs. Agents need stable JSON/JSONL, byte ranges, revision/index metadata, result IDs, pagination, score breakdowns, and skipped/non-exhaustive-result explanations more than human-friendly output.
+- Observed result: the lowest-risk implementation path is to add structured JSON serializers for existing analyzer outputs first, especially `compare --output json`, then `analyze duplicates --output json` and `analyze concerns --output json`. That establishes stable IDs, schema versions, paging, and explanation fields before adding new algorithms.
+- Decision: documented the detailed research in `docs/research/agent-query-interface.md` and added it to `RESEARCH.md`. Recommended roadmap: (1) JSON output for existing analyzers; (2) `query capabilities` and `query inspect`; (3) semantic search/QBE over `AnalysisContext`; (4) YAML query packs combining lexical/vector/metadata/AST retrieval; (5) Tree-sitter structural search; (6) optional symbol/reference/call graph facts later.
+
+## 2026-07-08 GPU/NPU Backend Research
+
+- Task: research the next optimization, GPU/NPU acceleration, with the goal of widest practical support across GPUs, NPUs, and vendor stacks while keeping the CPU default stable.
+- Method: spawned four parallel research lanes: local codebase attachment points, ONNX Runtime execution-provider coverage, Rust-native/cross-platform GPU alternatives, and packaging/CI rollout guardrails. Also inspected `fastembed 5.17.2`, `ort 2.0.0-rc.12`, `Cargo.toml`, `src/embed/*`, `src/config.rs`, `docs/packaging.md`, `architecture.md`, and current ONNX Runtime/Windows ML docs.
+- Current repo finding: `embedding.execution_provider` already validates `cpu`, `cuda`, `coreml`, `directml`, and `openvino`, and `ModelIdentity` already persists provider identity, but `FastembedBackend::new` hard-fails any provider except `cpu`. The low-churn hook is therefore provider-aware embedding inside the existing `Embedder`/`fastembed` path, not an analyzer rewrite.
+- Observed result: ONNX Runtime execution providers are the right first portability layer; Rust-native GPU stacks and GPU/ANN vector search should be deferred behind benchmark gates.
+- Decision: moved detailed notes to `docs/research/gpu-npu-backends.md`. Keep `cpu` default; implement experimental `directml`, `cuda`, `coreml`, and `openvino` provider plumbing first; benchmark provider drift before changing defaults.
+
+## 2026-07-08 Closure Call-Context Naming: Rust Adapter + Go/JS Residuals
+
+- Change: new `rust` language adapter names closures from their let binding (`let clamp = |v| ...` → `clamp`) or the call they are passed to (`aliases.sort_by_key(|a| ...)` → `aliases.sort_by_key(...)`), reusing `name_from_call_argument`. Go adapter extended with assignment naming (`handler := func...`, `var defaultLogFormatter = func...` — note the func literal sits under an `expression_list` inside `var_spec`/`short_var_declaration`) and an enclosing-function fallback (`BasicAuthForRealm.func`) covering returned closures and `go func(){...}()` IIFEs. JS got the same enclosing-function fallback (`shouldHaveHeaderValues.func`).
+- Helper hardening driven by real-corpus eyeballing: callee text is whitespace-collapsed so multiline method chains qualify; segment trimming is bracket-depth-aware (`callee_tail`) so receivers with parenthesized args never split mid-paren (was producing `glob).map_err(...)`); a leading `self.` is stripped; string labels strip `b`/`r`/`#` sigils and are dropped if a quote survives (was producing `captures_iter("b"aa bb cc dd")`).
+- Validation: extraction goldens extended with the new shapes (Rust let-closure, Go returned closure + go-IIFE) and regenerated; fmt/clippy/full tests clean.
+- Real-corpus validation without re-embedding: embeddings are keyed by `(model_id, normalized_body_hash)`, so `DELETE FROM files; DELETE FROM code_units;` + re-index refreshed unit names with `embedded 0 new bodies`. (`touch` does not work — the indexer falls back to a content-hash check. CLAUDE.md corrected. Beware: the sqlite3 CLI has foreign_keys OFF, so `DELETE FROM files` alone orphans `code_units` — delete both.)
+- Result: `<anonymous>` count is now **zero** in gin, ripgrep, and express reports, both arms (was: gin 39, ripgrep 60 mentions across v2 report files). Cluster hashes, ordering, unit counts, and scores are byte-identical to sweep v2 — naming is display-only, so no ranking side effects. Names read well: `HyperlinkFormat.aliases.sort_by_key(...)`, `BasicAuthForRealm.func`/`BasicAuthForProxy.func` (gin product cluster 12), `TestRunEmpty.func` family, `defaultLogFormatter`.
+- Decision: TODO residual "extend call-context naming to Rust closures" is done; JS/Go/Rust now share the same three-tier naming (assignment → call argument → enclosing function).
+
+## 2026-07-08 Idiom-Family Downrank + `#[cfg(test)]` Reclassification
+
+- Change 1: `Cluster.name_family` — a cluster with ≥6 members, ≥3 distinct scopes, and ≥75% of members sharing one unit name is flagged as a same-name impl family (`Flag::update`, `Display::fmt`, `Serialize::serialize`) and ordered after all other clusters in its section (membership, hashes, and scores untouched). Index rows get "— same-name family (`name`), likely idiom"; cluster pages get an explanatory header. Constants in `analyze/duplicate/mod.rs`, no config knob. The 6-member floor is deliberate: flask's real `add_url_rule` triple (3 members, 3 scopes, same name) must not be flagged.
+- Change 2: the Rust adapter gives `#[cfg(test)]` functions a `tests` scope (skipping doc comments between attribute and fn; `#[cfg(not(test))]` excluded), so ripgrep's top-level `#[cfg(test)] fn test_*` style — no `mod tests` — classifies as test code.
+- Validation: two new analysis tests (family flagged + ordered last despite higher boosted score; no flag without scope diversity, protecting scopeless C) and one extractor test; fmt/clippy/full suite clean; report goldens unchanged.
+- ripgrep/bge result: product section 131 → 119 clusters; 12 flag-test clusters (`test_block_buffered`…, now displayed `tests.test_*`) moved to Test-and-docs, 2 left Mixed. The seven `update`/`fmt`/`serialize` walls (9–16 members each) now sit at product ranks 113–119 with idiom markers; the top of the product table is real cross-name findings. Guard checks: flask `add_url_rule` still product #1, unflagged; redis flags nothing (C units have no scopes); gin flags exactly one family (9-member `Bind`, sinks to product #16); gin's 5-member `Render` family stays unflagged (below the member floor).
+- redis/coderank note: analyze on HEAD yields 359 clusters vs 358 in the sweep-v2 log — deterministic on re-run and present before these changes (drift from commit a7f9dc7's post-sweep fixes); naming/idiom changes were verified structure-identical on gin/ripgrep/express.
+- Decision: TODO residual "down-rank intentional-idiom families" is done via ordering + labeling rather than score penalties, so nothing is hidden and the ignore workflow still applies. If real same-name duplication ≥6 members shows up flagged on a future corpus, revisit with an exact-copy exemption.
+
+## 2026-07-08 Product↔Product Semantic FP Gate: Negative Result
+
+- Question: can a content-level signal over the embedding geometry (the TODO's "margin/coherence gate within clusters") separate redis's sentinel failover state-machine family (14 units in `sentinel.c`, pairwise `0.91–0.94` BGE, known false positive) from true duplicate families?
+- Method: `scratchpad prominence.py` probes over the existing oss-eval DBs. Per probe cluster: top/mean in-cluster cosine, local background (members' mean cosine to same-file non-members), top out-of-cluster cosine; prominence = top_in − local_bg; out-margin = top_in − top_out. Probes: sentinel family (FP) vs redis `zrange` family, `zslIsInRange` family, `publishCommand`/`spublishCommand`, flask `add_url_rule`, gin `Bind` (all TP/idiom-but-real-duplication). Run on BGE, CodeRank, and ABTT-transformed (m=2) BGE vectors.
+- BGE result: prominence FP `0.218` vs TPs `0.171–0.330` — the FP sits inside the TP range (zrange TP is `0.216`). Out-margin is worse: FP `0.077` while the `zslIsInRange` TP has `0.001`. Absolute score: the FP pair (`sentinelFailoverSelectSlave`↔`sentinelAbortFailover`, `0.9399`) outscores the `publishCommand` TP (`0.9099`).
+- CodeRank result: same picture — prominence FP `0.520` vs TPs `0.507–0.585`. Only weak signal: sentinel mean in-cluster cosine `0.578` is below every TP family (`0.686–0.939`), i.e. CodeRank sees the family as less *internally coherent*; but the same statistic on BGE (`0.859` vs zrange `0.883`) does not separate, and BGE is the default model.
+- ABTT (m=2, BGE) result: sentinel top_in `0.882` lands between TPs (`0.912`, `0.832`, `0.701`) — no separation; ABTT even drops a real TP below the FP.
+- Conclusion: **no cluster-statistic over these embeddings separates this FP shape** — the human judgment ("state-machine orchestration, not mergeable logic") is not present in the vectors' local geometry. Do not implement a margin/coherence gate; it would cost true positives one-for-one.
+- Decision: drop the gate idea from TODO. Realistic paths if this FP class matters later: (1) CodeRank as analysis model (its sweep-v2 top-20 never surfaced the family — a ranking effect, and its coherence stat is at least directionally right); (2) non-embedding features (AST statement-type histograms, call-graph overlap) as a separate rerank signal — different feature family, new experiment.
+
+## 2026-07-08 Exact Tokenizer Counts in the Batch Packer + Budget Recalibration
+
+- Root-cause measurement (`scratchpad token_check.py`, real tokenizers over each corpus's unit texts): the packer's chars/4 token estimate undershoots true counts on **every** OSS corpus — true/est length ratio p50 `1.27–1.62`, padded-area ratio flask `1.22–1.27`, express `1.28–1.48`, redis `1.33–1.43`, ripgrep `1.43–1.55`, gin `1.91–2.29`. This directly explains coderank/gin's `25.8 GB` (2.29x the 32M budget ≈ 73M true area). It does *not* alone explain redis/bge `16.8 GB` (redis 1.33x < gin/bge 1.91x, yet gin/bge peaked 7.7).
+- Change: `Embedder::count_tokens` — fastembed's `TextEmbedding.tokenizer` is a public field, so the backend now returns exact (truncation-clamped) counts; `pack_batches` takes `(hash, text, tokens)` and pages sort by real token count. Fallback stays chars/4 for backends without a tokenizer. Also added token-length instrumentation to `embed` output: p50/p90/p99/max lengths, truncation count/rate, padding waste (new `TokenStats`).
+- Re-measurement (release, `run_phase.py`):
+  - coderank/gin @32M: `25.8 GB → 6.1 GB`, `387.7 → 305.3 s`. The budget now holds; **no linear activation term needed** — the overshoot was entirely estimate error.
+  - redis/bge @32M: `16.8 → 10.7 GB`, `474 → 443 s` — improved but still the highest BGE run.
+  - Budget bisect on redis/bge: @16M → `4.49 GB` at `424.1 s` (faster than 32M). Peak tracks budget cleanly ⇒ **no ort-arena pathology; the redis "anomaly" is closed**: redis is simply the only corpus whose batches consistently saturate the area budget (13.2% of bodies at the 512 clamp, p90 = 512; other corpora rarely fill a batch to cap), amplified by the old under-count.
+  - coderank/gin @16M: `5.4 GB` at `279.8 s` — also faster than 32M.
+- Decision: `embedding.max_batch_token_area` default lowered `32M → 16M` — Pareto-better (time AND memory) on both budget-saturating extremes; on CPU, larger batches buy nothing. Analyze reruns on the re-embedded DBs reproduce identical cluster counts (redis/bge 430, gin/coderank 152), confirming batch composition does not affect results.
+- Follow-up: `runs/oss-eval/timings.tsv` embed rows predate exact counting; refresh on the next full sweep. Padding waste is now printed per run (redis/bge 25–31%) — worth revisiting only if profiling shows it matters.
+
+## 2026-07-08 Execution-Provider Backend Plumbing (Stage 0)
+
+- Scope: implement the provider plumbing from `docs/research/gpu-npu-backends.md`
+  and the packaging decision in `docs/research/release-architecture.md` (one
+  crate, backends as cargo features, CPU stays a single static binary). This
+  is code + config + doctor only — no accelerator artifacts built or run
+  (no GPU/NPU on the dev box).
+- Config: new `embedding.provider_mode` (`require` default | `auto`).
+  `require` fails loudly when a requested non-cpu provider is missing or
+  unavailable; `auto` warns and falls back to cpu. Env overrides applied in
+  `Config::load` before validation: `DECOMBINE_EXECUTION_PROVIDER=<name>`
+  and `DECOMBINE_DISABLE_ACCEL=1` (disable wins). Starter template documents
+  both keys.
+- Backend: `FastembedBackend::new` no longer hard-fails non-cpu. New
+  `resolve_providers` returns `(Vec<ExecutionProviderDispatch>, actual)`;
+  cpu ⇒ empty list. `build_accelerator` (accel-gated) maps a name to an
+  `ort::ep` EP, checks `is_available()` + `supported_by_platform()`, and
+  marks the dispatch `error_on_failure()` in `require` mode. The **actual**
+  provider (cpu after a fallback, not the requested accelerator) is what the
+  model identity records — so gpu/cpu embeddings never collide on one DB row.
+  EPs are passed to both the catalog and custom-model init paths.
+- Cargo: `ort = "=2.0.0-rc.12"` added as an *optional* direct dep (matches
+  fastembed's pin, so `ort/cuda` etc. unify onto the one shared instance).
+  Features `cuda`/`directml`/`coreml`/`openvino` (each ⇒ `accel` ⇒ `dep:ort`
+  + matching `ort/<ep>`), plus `load-dynamic`. Default build unchanged:
+  `ldd` still shows no libonnxruntime, CPU statically linked.
+- Doctor: `decombine doctor` now prints ort/fastembed versions, the effective
+  provider + mode, and per-accelerator status (`accelerator_diagnostics()` in
+  `embed/mod.rs` — compiled? / ORT-available? / platform-supported?).
+  `doctor --provider <name>` runs a live embedding smoke test and prints the
+  provider actually in effect.
+- Verified on the CPU (default) build: `cargo fmt`/`clippy` clean on both
+  default and `--features accel`; full suite 70+ tests pass; `--features
+  accel` type-checks. Runtime: default doctor lists all four accelerators
+  "not compiled in"; `require`+cuda errors with rebuild instructions before
+  any model download; `auto`+cuda warns, falls back, smoke-embeds on cpu with
+  "provider in effect: cpu"; `DECOMBINE_DISABLE_ACCEL=1` forces cpu over a
+  `cuda` env request; a bad provider name still hits config validation.
+- Untested (no hardware): actual EP registration/inference for cuda/directml/
+  coreml/openvino, and the `load-dynamic` build (needs `--no-default-features`
+  to avoid double-linking ORT). Next stages per the research docs: build a
+  DirectML experimental artifact + CI, then the benchmark gate (vector drift,
+  top-k overlap, duplicate/comparison output drift vs cpu).
+
+## 2026-07-08 CodeRank Quantization Utility and Custom Artifact Identity
+
+- Change: custom ONNX model identity now records content hashes for the ONNX
+  file (`ModelIdentity.model_hash`) and tokenizer/config files
+  (`ModelIdentity.tokenizer_hash`) instead of relying only on the custom path
+  string in `revision`. This protects fp32/int8 custom artifacts from sharing a
+  DB model row if a file is replaced at the same path.
+- Change: added `scripts/coderank_onnx.py` with three artifact-prep commands:
+  `build-corpus` creates stratified calibration/holdout JSONL from retained
+  decombine DB embedding texts, `quantize` runs ONNX Runtime static int8 QDQ
+  quantization and emits `decombine-model-manifest.json`, and `verify` gates
+  fp32 ONNX vs Torch plus candidate ONNX vs fp32 ONNX using the TODO thresholds
+  (pooled cosine, pairwise-delta, and top-10 recall).
+- Validation: `python3 -m py_compile scripts/coderank_onnx.py`;
+  `scripts/coderank_onnx.py --help`; `cargo test
+  custom_artifact_hashes_track_model_and_tokenizer_bytes`.
+- Observed result: script syntax and CLI surface are valid; the focused Rust
+  unit test passes and confirms ONNX byte changes affect `model_hash` while
+  tokenizer/config byte changes affect `tokenizer_hash`. No real CodeRank int8
+  artifact was generated or verified in this pass.
+- Decision: keep quantization/Torch verification in a source-controlled Python
+  utility rather than adding Python ML dependencies to the Rust CLI. Runtime
+  config continues to point at concrete custom ONNX files; production config
+  cleanup remains a TODO until at least one verified int8 artifact exists.
+
+## 2026-07-08 Case-study Corpus Selection Research
+
+- Task: choose the first per-language open-source repositories for public
+  decombine case studies, plus intentionally messy AI-assisted / rapid-build
+  stress cases such as OpenClaw.
+- Method: inspected supported languages from `assets/languages/`; queried
+  GitHub metadata on 2026-07-08 with `gh api "repos/<owner>/<repo>" --jq
+  '[.full_name,.language,(.license.spdx_id // "NOASSERTION"),.stargazers_count,.size,.pushed_at,.html_url] | @tsv'`;
+  cross-checked OpenClaw's license page because GitHub API returned
+  `NOASSERTION` while the repo contains an MIT license file.
+- Observed result: the defensible public breadth matrix is Valkey, fmt,
+  PowerShell, Gin, Express, Spring Boot, OkHttp, Laravel, Flask, Rails,
+  ripgrep, and TypeScript. Current `redis/redis` metadata is not a permissive
+  SPDX result, so Redis should stay internal or be pinned to a manually cleared
+  permissive-era commit; Valkey is the public C replacement. OpenClaw is the
+  right first AI-assisted stress target, but it needs pinned-SHA license review
+  and unsupported-language excludes before publication.
+- Decision: added `docs/research/case-study-corpus-selection.md`, linked it
+  from `RESEARCH.md`, and amended the case-study pipeline note so the target
+  matrix and Redis/Valkey caveat are explicit before any public corpus run.
+
+## 2026-07-08 Per-Language Untruncated Token Measurement + Silent-Truncation Audit
+
+- Task: quantify how much the embedding token cap silently truncates code
+  units, per language, before choosing a mitigation (collapse_trivia vs
+  chunking). Motivated by the 512-token cap on the BGE default reading as an
+  unaudited, silent quality hole.
+- Change: added a `tokens` subcommand + `embed::token_report`. It scans every
+  distinct indexed unit body (regardless of embedding state, so it works on
+  already-embedded DBs), recovers text from source under report/minimal
+  retention via the existing `recover_texts_from_source` path, and counts true
+  token lengths with an **untruncated** tokenizer clone
+  (`Embedder::count_tokens_untruncated`; fastembed clones its inference
+  tokenizer with `with_truncation(None)` so severity past the cap is visible —
+  `count_tokens` clamps at the cap and hid it). Reports per-language
+  p50/p90/p99/max and over-cap counts at 512 and the model's own cap.
+- Method: ran `decombine --config <coderank.yaml> tokens` (CodeRank cap 2048)
+  across the OSS-eval ladder (redis=C, flask=Python, express=JS, gin=Go,
+  ripgrep=Rust) plus cadabra and altium (Rust).
+- Observed result (units | p50 | p90 | p99 | max | >512 | >2048):
+  - C (redis):        4226 | 161 | 613 | 1952 | 3298 | 13.1% | 0.8%
+  - Python (flask):   1003 |  83 | 245 |  539 |  888 |  1.4% | 0.0%
+  - JS (express):     2446 |  83 | 293 | 1305 | 3010 |  6.1% | 0.4%
+  - Go (gin):         1494 |  89 | 278 |  857 | 2002 |  3.0% | 0.0%
+  - Rust (ripgrep):   1706 | 109 | 329 |  817 | 2126 |  4.6% | 0.1%
+  - Rust (cadabra):   4625 | 130 | 590 | 1757 | 3176 | 12.5% | 0.5%
+  - Rust (altium):     326 | 148 | 386 | 1087 | 1145 |  6.7% | 0.0%
+- Findings:
+  - The BGE 512 cap is a real, previously-silent loss: 1.4% (Python) up to
+    ~13% (C, heavy Rust) of units are truncated, worst on large real
+    codebases. Truncation rate is driven more by codebase heft than language
+    (ripgrep Rust 4.6% vs cadabra Rust 12.5%).
+  - The CodeRank 2048 cap nearly eliminates it: 0.0-0.8% over 2048, max
+    observed ~3300 tokens, and p99 of the heaviest corpora (redis 1952,
+    cadabra 1757) sits just under 2048 — 2048 is a well-chosen cap.
+  - collapse_trivia's value *for truncation* is marginal under CodeRank (the
+    problem is already <1%); its payoff would be throughput/padding, a separate
+    axis. The residual 0.1-0.8% genuinely-huge units are the chunking case
+    (TODO: long-unit handling), not a trivia problem.
+- Decision: strong quantitative support for making CodeRank (2048) the default
+  over BGE (512) — the switch closes a 5-13% silent-truncation hole on the
+  common heavy-codebase case. Truncation is no longer silent regardless of
+  model: `tokens` audits it and `embed` already prints truncated%. Defer
+  collapse_trivia as a throughput lever, not a truncation fix. Long-unit
+  chunking stays scoped to the <1% tail.
+
+## 2026-07-08 CodeRankEmbed as Default Model (Managed Auto-Download + Full Switch)
+
+- Task: act on the truncation audit — make CodeRankEmbed (2048-token context)
+  the default over BGESmallENV15 (512), which requires the CodeRank ONNX to
+  reach users without hand-placement.
+- Decision (user): auto-download on first use with SHA256 verification; full
+  switch (model + ported thresholds), BGE kept selectable.
+- Change:
+  - New "managed model" concept in `config.rs` (`MANAGED_MODELS`,
+    `managed_model()`): a name (`CodeRankEmbed`) backed by pinned HF files
+    (`Zenabius/CodeRankEmbed-onnx`, 5 files with SHA256 + size). Validation and
+    `EmbeddingConfig::dimensions()` accept managed names with no `custom` block;
+    `quantized` rejected for them.
+  - `fastembed_backend`: when `model` is managed and no `custom` block is set,
+    materialize files into `<cache>/custom/<id>` (download via `ureq` streamed
+    to `<file>.part` with streaming SHA256, promoted only on match; existing
+    files verified and skipped), then load through the existing custom ONNX
+    path. Identity revision is path-independent (`managed:<repo>@<rev>`) unlike
+    an explicit custom block's absolute-path revision. `ureq` added as an
+    optional dep gated on the `fastembed` feature.
+  - `models list` now shows managed models; `models download` already routes
+    through backend construction so it triggers the fetch.
+  - Defaults flipped: `model` BGESmallENV15 → CodeRankEmbed; duplicate
+    thresholds 0.88/0.92/0.94 → 0.70/0.81/0.85 (background-relative port).
+    CONFIG_TEMPLATE + architecture.md + benchmarks.md updated; BGE documented
+    as the lightweight no-download alternative.
+  - Tests decoupled from product defaults: both `analysis_config()` helpers
+    (analysis.rs, report_golden.rs) pinned to the historical BGE thresholds so
+    the hash-backend tests and golden fixtures are stable across the flip.
+- Validation: `cargo fmt --check`, `cargo clippy --all-targets --features
+  fastembed -D warnings`, `cargo test` (73 lib + integration, all pass),
+  `cargo check --no-default-features` (ureq/managed code correctly
+  feature-gated). End-to-end offline (box already has the cached files, so the
+  verify-and-skip path ran, not a network download): `doctor --provider cpu`
+  smoke embed → 768 dims; full `run` on a 2-function corpus → indexed →
+  embedded 3 bodies → analyzed → report, DB identity
+  `managed:Zenabius/CodeRankEmbed-onnx@main` dims 768.
+- Not covered: the actual network download path (no network in this env) — the
+  streaming-download + hash-gate logic is exercised only via the skip-when-
+  present branch; a clean-machine download remains to be smoke-tested.
+- Decision/follow-ups: comparison raw-threshold defaults left at BGE scale
+  (comparison is opt-in and has background calibration; its threshold porting
+  belongs with the Robust Comparison Calibration block). Recalibration
+  baselines and a clean-machine download test are open.
+
+## 2026-07-08 Robust Comparison Calibration (overlap-robust anchors, sigma floors, margin gate)
+
+- Task: TODO block #4 — make `comparison.calibration: background` robust on
+  low-overlap corpora, where the top1_p95 anchor collapses and the position-
+  mapped match bar sinks enough to readmit false positives.
+- Change (`src/analyze/compare/mod.rs`, `config.rs`, `report/markdown.rs`):
+  - Config knobs: `calibration_anchor` (top1_p95|same_name|hybrid, default
+    hybrid), `min_same_name_anchors` (3), `candidate_sigma_floor` (2.0),
+    `match_sigma_floor` (4.0), `strong_min_margin_sigma` (0.0, opt-in).
+  - Same-name anchor: median cosine of unambiguous same-name/same-kind/same-
+    language cross-project pairs (a rename proxy that does not collapse when few
+    left units have real counterparts). `hybrid` = max(top1_p95, same_name)
+    when count ≥ min, else top1_p95.
+  - Sigma floors: effective candidate/match clamped to `bg + kσ` (calibration
+    can only tighten). Surfaced in the report with which floor bound.
+  - Margin gate: strong match requires mutual-best + raw ≥ match_threshold +
+    top1−top2 margin ≥ `strong_min_margin_sigma·σ` in BOTH directions; near-ties
+    fall to possible. Split/merge exempt; gate needs background calibration.
+  - 3 new unit tests (same-name selection + ambiguity exclusion, floor clamp,
+    margin demotion); existing calibration tests pinned (floors 0 on the
+    bimodal synthetic backgrounds). fmt + clippy + full test suite clean.
+- Validation (CodeRank, positions 0.30/0.65, robust vs legacy=top1_p95+no floors):
+  - cadabra (low-overlap, 4.6k units/side): top1_p95 anchor collapses to 0.72
+    (the flagged pathology); legacy match bar 0.5507 classifies the known false
+    positive `face_count`↔`TopologyStore.counts` (raw 0.6278) as STRONG. Robust
+    bg+4σ floor lifts the match bar to 0.6652 → demotes it to POSSIBLE. True
+    probes stay covered: `Point3/Point2.vector_to` strong(6)/split(4)/merge(2),
+    `Vec2.length` split(1)/merge(7). Spurious many-to-many also shrank
+    (splits 114→55, merges 96→39; clean strong 33→40).
+  - altium (high-overlap, 326/side): renames stay strong in every arm
+    (`parse_params↔parse_entries`, `preserves_duplicate_keys↔…`); the third
+    (`read_footprint_data↔decode_pcb_record`) is possible in both — no
+    regression. hybrid kept top1_p95 (0.993 > same-name 0.948, n=18).
+  - candidate_sigma_floor tuned 3.0→2.0 on evidence: at 3σ the candidate floor
+    over-culled recall (altium possible 56→20, missing 7→46; cadabra possible
+    1404, missing 2463) with NO change to strong/split/merge (those are match-
+    gated). At 2σ, strong/split/merge identical (altium 13, cadabra 40/55/39)
+    while recall recovers near legacy (altium possible 43/missing 23; cadabra
+    possible 2938/missing 929). So the match floor is the precision lever and
+    the candidate floor is a pure recall/noise guard — 2σ is Pareto-better.
+- Decision: ship robust defaults (hybrid anchor, candidate 2σ / match 4σ floors,
+  margin gate off). All TODO #4 success criteria met on both testbeds. Margin
+  gate left opt-in (no evidence it was needed once floors fix the match bar; it
+  could demote true renames if set too high). Comparison thresholds now port
+  across models via calibration; the earlier "port comparison raw defaults"
+  follow-up is effectively subsumed by recommending `calibration: background`.
+
+## 2026-07-08 Compare-Phase Performance (parallel bounded top-k, scan reuse)
+
+- Task: TODO block #5 — the compare phase was the slow path (debug cadabra
+  compare, ~4.6k units/side, ran >10 min).
+- Change (`src/analyze/vector_store.rs`, `src/analyze/compare/mod.rs`):
+  - `top_k_between` is now parallel over `from` (rayon; queries are
+    independent) with bounded top-k selection — it keeps only the running best
+    k via `partition_point` insert instead of collecting every above-threshold
+    hit and sorting the whole row. A `-1.0`-threshold scan (calibration) no
+    longer materializes/sorts a full row. `pair_ranks_before` reproduces the
+    old (score desc, `to`-index asc) order exactly.
+  - Calibration scan reuse: under background calibration the left→right pass is
+    scanned once unpruned; the top-1 anchor is read from it and the candidate
+    edges are that same pass filtered by the calibrated threshold (filtering an
+    unpruned top-k by a threshold == the thresholded top-k). Full cross-product
+    scans drop 3 → 2.
+  - Edge construction no longer does an O(n) `pending_left.contains(...)` per
+    emitted pair — the direction is known per pass (`top_k_between` guarantees
+    `a`=from, `b`=to), so left/right are assigned directly.
+- Validation: behavior-preserving by construction; all 24 comparison unit
+  tests pass; and on the full cadabra CodeRank corpus the new code reproduces
+  the exact section counts validated for block #4 (strong 40, possible 2938,
+  splits 55, merges 39, missing 929; `face_count`↔`counts` stays possible),
+  deterministic across reruns and thread counts (non-timestamp report files
+  byte-identical).
+- Benchmark (cadabra CodeRank, 4.6k units/side, `run_phase.py` wall/RSS):
+  - release, all 16 cores: 0.9 s / 68 MB.
+  - release, 1 thread (`RAYON_NUM_THREADS=1`): 8.6 s → ~9.5x from parallelism.
+  - debug, all cores: 25.7 s (was >10 min pre-#5; the O(n) contains removal and
+    the 3→2 scan reduction dominate the extra gain in unoptimized builds).
+- Decision: exact cross-product search is NOT a bottleneck (sub-second release
+  on the largest standing testbed), so ANN/HNSW stays deferred per the TODO
+  guard. `top_k_between` remains O(n²) in dot products but is now parallel,
+  allocation-light, and scanned the minimum number of times.
+
+## 2026-07-09 Execution-Provider Drift Gate (CPU-vs-accelerator equivalence)
+
+- Task: TODO "Accelerated Execution Providers" — the Stage-0 EP plumbing (cargo
+  lanes, `ort` dispatch, `resolve_providers`, `doctor` smoke test) already
+  shipped; the missing piece is a correctness gate proving a non-CPU provider
+  produces embeddings equivalent to the CPU baseline before its build is
+  trusted. Chosen because it is fully testable on this CPU-only box.
+- Change: `src/analyze/drift.rs` + `decombine drift --baseline A.db
+  --candidate B.db`. Compares the embeddings stored under each database's model
+  for their shared body hashes (model/provider-independent hashes align the two
+  sets), at two levels:
+  - vector: per-body cosine distribution (mean/p50/p05/min) + max abs
+    per-component delta on normalized vectors;
+  - structural: mean top-k nearest-neighbour recall (the signal duplicate
+    detection depends on), reusing the parallel `top_k_between`.
+  Gate flags `--min-cosine` (default 0.9999) and `--min-recall` (0.99); a
+  failing gate exits non-zero (CI-friendly). New `db.all_embeddings(model_id)`.
+  3 unit tests (identical → zero drift; small perturbation → cosine <1 but
+  neighbourhoods preserved; shared-hash-only + dim-mismatch error).
+- Validation (CPU, real DBs):
+  - self-vs-self (altium BGE vs itself): cosine mean/min 1.000000, max Δ 0,
+    top-10 recall 1.0000 → PASS, exit 0.
+  - cross-model (altium BGE vs AllMiniLML6V2, same source, both 384-dim):
+    cosine mean 0.191 / min 0.056, recall 0.607 → gate FAILED, exit 1. Confirms
+    the gate detects real divergence; the ~0.61 recall across two unrelated
+    models is the partially model-agnostic code-similarity structure.
+- Not covered: an actual CPU-vs-accelerator run (no GPU on this box). The
+  machinery is proven (passes identical, fails divergent); a real CUDA/DirectML
+  build just needs to embed the same corpus and run `drift` against the CPU DB.
+- Decision: the drift gate is the intended CI guardrail for accelerator builds.
+  Default thresholds (cosine 0.9999 / recall 0.99) suit same-model
+  cross-provider fp32, where near-identity is expected; loosen for int8/quantized
+  accelerator paths.

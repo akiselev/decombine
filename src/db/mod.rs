@@ -438,6 +438,23 @@ impl Db {
             .map(|blob| blob_to_vector(&blob)))
     }
 
+    /// Every `(body_hash, vector)` embedded under `model_id`, hash-ordered for
+    /// deterministic alignment across databases.
+    pub fn all_embeddings(&self, model_id: ModelId) -> Result<Vec<(String, Vec<f32>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT normalized_body_hash, vector_blob FROM embeddings
+             WHERE model_id = ?1 ORDER BY normalized_body_hash",
+        )?;
+        let rows = stmt
+            .query_map([model_id], |row| {
+                let hash: String = row.get(0)?;
+                let blob: Vec<u8> = row.get(1)?;
+                Ok((hash, blob_to_vector(&blob)))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn count_embeddings(&self, model_id: ModelId) -> Result<i64> {
         Ok(self.conn.query_row(
             "SELECT COUNT(*) FROM embeddings WHERE model_id = ?1",
@@ -500,6 +517,23 @@ impl Db {
             .query_map(params![model_id, after_hash, limit as i64], |row| {
                 Ok((row.get(0)?, row.get(1)?))
             })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// One `(hash, language, embedding_text)` per distinct body hash across
+    /// all projects, for offline token measurement. `embedding_text` is NULL
+    /// under report/minimal retention and must be recovered from source. When
+    /// a hash spans languages, `MAX` picks one deterministically.
+    pub fn all_unit_texts(&self) -> Result<Vec<(String, String, Option<String>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT u.normalized_body_hash, MAX(u.language_id), MAX(u.embedding_text)
+             FROM code_units u
+             GROUP BY u.normalized_body_hash
+             ORDER BY u.normalized_body_hash",
+        )?;
+        let rows = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }

@@ -99,7 +99,14 @@ fn meta(ctx: &AnalysisContext, retention: RetentionMode) -> report::ReportMeta {
 }
 
 fn analysis_config() -> AnalysisConfig {
-    serde_yaml::from_str("{}").unwrap()
+    // Pinned to the historical BGE-scale duplicate thresholds so these golden
+    // fixtures stay stable independent of the product default (now CodeRank
+    // scale). The hash backend's geometry is model-agnostic; these numbers just
+    // fix the classifier the fixtures were generated against.
+    serde_yaml::from_str(
+        "candidate_threshold: 0.88\nsimilarity_threshold: 0.92\nrerank_threshold: 0.94\n",
+    )
+    .unwrap()
 }
 
 fn assert_matches_golden(dir: &Path, files: &[&str], golden_subdir: &str) {

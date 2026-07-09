@@ -114,7 +114,13 @@ impl VectorStore {
     }
 
     /// For every unit in `from`, the top-k most similar units in `to` with
-    /// cosine >= `threshold`. Indices are unit indices.
+    /// cosine >= `threshold`, ranked by descending score then ascending `to`
+    /// unit index. Indices are unit indices.
+    ///
+    /// Parallel over `from` (queries are independent) with bounded top-k
+    /// selection: each query keeps only the running best `k` instead of
+    /// collecting and sorting every above-threshold hit, so a `-1.0` threshold
+    /// scan (used by calibration) no longer materializes and sorts a full row.
     pub fn top_k_between(
         &self,
         from: &[usize],
@@ -122,24 +128,50 @@ impl VectorStore {
         k: usize,
         threshold: f32,
     ) -> Vec<Vec<ScoredPair>> {
-        from.iter()
+        if k == 0 {
+            return vec![Vec::new(); from.len()];
+        }
+        // Resolve candidate rows once; skip `to` units without an embedding.
+        let to_rows: Vec<(usize, usize)> = to
+            .iter()
+            .filter_map(|&b| self.row_for_unit(b).map(|row| (b, row)))
+            .collect();
+        from.par_iter()
             .map(|&a| {
                 let Some(row_a) = self.row_for_unit(a) else {
                     return Vec::new();
                 };
-                let mut scored: Vec<ScoredPair> = to
-                    .iter()
-                    .filter_map(|&b| {
-                        let row_b = self.row_for_unit(b)?;
-                        let score = self.dot(row_a, row_b);
-                        (score >= threshold).then_some(ScoredPair { a, b, score })
-                    })
-                    .collect();
-                scored.sort_by(|x, y| y.score.total_cmp(&x.score).then(x.b.cmp(&y.b)));
-                scored.truncate(k);
-                scored
+                let va = self.vector(row_a);
+                let mut best: Vec<ScoredPair> = Vec::with_capacity(k + 1);
+                for &(b, row_b) in &to_rows {
+                    let score = dot(va, self.vector(row_b));
+                    if score < threshold {
+                        continue;
+                    }
+                    let cand = ScoredPair { a, b, score };
+                    if best.len() == k && !pair_ranks_before(&cand, &best[k - 1]) {
+                        continue;
+                    }
+                    let pos = best.partition_point(|x| pair_ranks_before(x, &cand));
+                    best.insert(pos, cand);
+                    if best.len() > k {
+                        best.pop();
+                    }
+                }
+                best
             })
             .collect()
+    }
+}
+
+/// Ranking used by `top_k_between`: higher score first, then smaller `to`
+/// unit index (each candidate `b` is distinct within one query, so this is a
+/// strict total order and matches the previous sort-and-truncate exactly).
+fn pair_ranks_before(x: &ScoredPair, y: &ScoredPair) -> bool {
+    match x.score.total_cmp(&y.score) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Less => false,
+        std::cmp::Ordering::Equal => x.b < y.b,
     }
 }
 

@@ -85,10 +85,40 @@ fn comparison_header(
         config.abtt_directions
     );
     if let Some(cal) = calibration {
+        let anchor = match &cal.same_name_anchor {
+            Some(a) => format!(
+                "anchor {source} {value:.4} (top1_p95 {top1:.4}, same-name {a:.4} from {count})",
+                source = cal.anchor_source,
+                value = cal.effective_anchor,
+                top1 = cal.top1_anchor,
+                count = cal.same_name_count,
+            ),
+            None => format!(
+                "anchor {source} {value:.4} (top1_p95 {top1:.4}, no same-name anchors)",
+                source = cal.anchor_source,
+                value = cal.effective_anchor,
+                top1 = cal.top1_anchor,
+            ),
+        };
+        let floors = match (cal.candidate_floored, cal.match_floored) {
+            (false, false) => String::new(),
+            _ => format!(
+                " [floored: candidate {c}, match {m}; floors {cf:.4}/{mf:.4}]",
+                c = if cal.candidate_floored { "yes" } else { "no" },
+                m = if cal.match_floored { "yes" } else { "no" },
+                cf = cal.candidate_floor,
+                mf = cal.match_floor,
+            ),
+        };
+        let margin = if cal.margin_required > 0.0 {
+            format!(", strong margin ≥ {:.4}", cal.margin_required)
+        } else {
+            String::new()
+        };
         let _ = writeln!(
             out,
             "- Calibration: background ({status}): background mean {mean:.4} ± {std:.4} \
-             (n={n}), top-1 anchor {anchor:.4}, effective candidate {cand:.4} / match {mat:.4}",
+             (n={n}), {anchor}, effective candidate {cand:.4} / match {mat:.4}{floors}{margin}",
             status = if cal.applied {
                 "applied"
             } else {
@@ -97,7 +127,6 @@ fn comparison_header(
             mean = cal.background_mean,
             std = cal.background_std,
             n = cal.sampled_pairs,
-            anchor = cal.top1_anchor,
             cand = cal.effective_candidate_threshold,
             mat = cal.effective_match_threshold,
         );

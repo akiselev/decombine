@@ -9,10 +9,12 @@ use std::time::{Duration, Instant};
 
 use decombine::analyze::compare::CompareAnalyzer;
 use decombine::analyze::concerns::ConcernAnalyzer;
+use decombine::analyze::drift::{DriftReport, DriftSide, compute_drift};
 use decombine::analyze::duplicate::{DuplicateAnalyzer, ignore::load_ignored_hashes};
 use decombine::analyze::{AnalysisContext, Analyzer};
 use decombine::cli::{
-    AnalysisCommand, Cli, Command, CompareArgs, DoctorArgs, LanguagesCommand, ModelsCommand,
+    AnalysisCommand, Cli, Command, CompareArgs, DoctorArgs, DriftArgs, LanguagesCommand,
+    ModelsCommand,
 };
 use decombine::config::{CONFIG_TEMPLATE, Config};
 use decombine::db::Db;
@@ -263,6 +265,87 @@ fn print_embed_progress(progress: decombine::embed::EmbedProgress) {
     );
 }
 
+type LoadedSide = (decombine::db::EmbeddingModelRecord, Vec<(String, Vec<f32>)>);
+
+/// Load the single embedding model of a database and its stored vectors.
+fn load_drift_side(path: &std::path::Path) -> Result<LoadedSide> {
+    let db = decombine::db::open_or_create(path)?;
+    let model = match db.list_models()?.as_slice() {
+        [one] => one.clone(),
+        [] => bail!("{} has no embedding model", path.display()),
+        many => bail!(
+            "{} has {} embedding models; drift needs one embedding set per database",
+            path.display(),
+            many.len()
+        ),
+    };
+    let embeddings = db.all_embeddings(model.id)?;
+    Ok((model, embeddings))
+}
+
+fn run_drift(args: &DriftArgs) -> Result<()> {
+    let (baseline_model, baseline_emb) = load_drift_side(&args.baseline)?;
+    let (candidate_model, candidate_emb) = load_drift_side(&args.candidate)?;
+    let baseline = DriftSide {
+        label: "baseline",
+        identity: &baseline_model.identity,
+        embeddings: baseline_emb,
+    };
+    let candidate = DriftSide {
+        label: "candidate",
+        identity: &candidate_model.identity,
+        embeddings: candidate_emb,
+    };
+    let report = compute_drift(&baseline, &candidate, args.top_k, args.sample)?;
+    print_drift(&report);
+
+    let cosine_ok = report.cosine_min >= args.min_cosine;
+    let recall_ok = report.recall_queries == 0 || report.mean_neighbor_recall >= args.min_recall;
+    if cosine_ok && recall_ok {
+        println!(
+            "gate: PASS (min cosine >= {:.6}, mean recall >= {:.4})",
+            args.min_cosine, args.min_recall
+        );
+        Ok(())
+    } else {
+        bail!(
+            "drift gate FAILED: min cosine {:.6} (need >= {:.6}), mean recall {:.4} (need >= {:.4})",
+            report.cosine_min,
+            args.min_cosine,
+            report.mean_neighbor_recall,
+            args.min_recall,
+        );
+    }
+}
+
+fn print_drift(r: &DriftReport) {
+    println!(
+        "drift: baseline {} (provider {}, {} bodies) vs candidate {} (provider {}, {} bodies)",
+        r.baseline_model,
+        r.baseline_provider,
+        r.baseline_count,
+        r.candidate_model,
+        r.candidate_provider,
+        r.candidate_count,
+    );
+    println!("shared bodies: {} ({}-dim)", r.shared, r.dimensions);
+    println!(
+        "cosine: mean {:.6} / p50 {:.6} / p05 {:.6} / min {:.6}; max |Δcomponent| {:.6}",
+        r.cosine_mean, r.cosine_p50, r.cosine_p05, r.cosine_min, r.max_abs_component_delta,
+    );
+    if r.recall_queries > 0 {
+        println!(
+            "top-{} neighbour recall: {:.4} (over {} queries)",
+            r.top_k, r.mean_neighbor_recall, r.recall_queries,
+        );
+    } else {
+        println!(
+            "top-{} neighbour recall: n/a (fewer than 2 shared units)",
+            r.top_k
+        );
+    }
+}
+
 fn print_token_stats(tokens: &decombine::embed::TokenStats) {
     if tokens.count() == 0 {
         return;
@@ -278,6 +361,58 @@ fn print_token_stats(tokens: &decombine::embed::TokenStats) {
         100.0 * tokens.truncated as f64 / tokens.count() as f64,
         100.0 * tokens.padding_waste(),
     );
+}
+
+fn print_token_report(report: &[decombine::embed::LanguageTokens], max_len: usize) {
+    if report.is_empty() {
+        println!("no indexed units to measure (is the database indexed?)");
+        return;
+    }
+    // Over-cap thresholds: 512 (the BGE/catalog ceiling) and the model's own
+    // cap, deduped so a 512-cap model shows one column.
+    let mut thresholds = vec![512usize, max_len];
+    thresholds.sort_unstable();
+    thresholds.dedup();
+
+    let over_headers: String = thresholds
+        .iter()
+        .map(|t| format!("{:>13}", format!(">{t}")))
+        .collect();
+    println!(
+        "untruncated token lengths per language (model cap {max_len} tokens):\n{:<12}{:>8}{:>7}{:>7}{:>7}{:>8}{}",
+        "language", "units", "p50", "p90", "p99", "max", over_headers,
+    );
+
+    let mut total = decombine::embed::TokenStats::default();
+    let print_row = |name: &str, s: &decombine::embed::TokenStats| {
+        let overs: String = thresholds
+            .iter()
+            .map(|&t| {
+                let n = s.over(t);
+                format!(
+                    "{:>13}",
+                    format!("{n} ({:.1}%)", 100.0 * n as f64 / s.count().max(1) as f64)
+                )
+            })
+            .collect();
+        println!(
+            "{:<12}{:>8}{:>7}{:>7}{:>7}{:>8}{}",
+            name,
+            s.count(),
+            s.percentile(0.50),
+            s.percentile(0.90),
+            s.percentile(0.99),
+            s.max(),
+            overs,
+        );
+    };
+    for lang in report {
+        print_row(&lang.language, &lang.stats);
+        total.merge(&lang.stats);
+    }
+    if report.len() > 1 {
+        print_row("ALL", &total);
+    }
 }
 
 fn main() -> Result<()> {
@@ -335,13 +470,27 @@ fn main() -> Result<()> {
             print_token_stats(&stats.tokens);
             Ok(())
         }
+        Command::Tokens => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            let embedder = load_embedder_with_progress(&config)?;
+            let report = decombine::embed::token_report(&db, &config, embedder.as_ref())?;
+            print_token_report(&report, embedder.max_sequence_length());
+            Ok(())
+        }
         Command::Models(args) => match args.command {
             ModelsCommand::List => {
+                for m in decombine::config::MANAGED_MODELS {
+                    println!(
+                        "{}: {} dims, {}-token context (managed: downloaded + verified on first use)",
+                        m.name, m.dimensions, m.max_length
+                    );
+                }
                 for (name, dims, has_quantized) in decombine::config::SUPPORTED_MODELS {
                     println!(
-                        "{name}: {dims} dims{}",
+                        "{name}: {dims} dims, 512-token context (fastembed catalog){}",
                         if *has_quantized {
-                            " (quantized variant available)"
+                            ", quantized variant available"
                         } else {
                             ""
                         }
@@ -379,6 +528,7 @@ fn main() -> Result<()> {
             }
         },
         Command::Doctor(args) => run_doctor(&cli.config, args),
+        Command::Drift(args) => run_drift(args),
         Command::Analyze(args) => {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
