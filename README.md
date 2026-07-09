@@ -1,15 +1,13 @@
 # decombine
 
-An embedding-based detector for non-exact code duplication, cross-directory
-duplication signals, and project-to-project comparison. `decombine` indexes
-code units with Tree-sitter, embeds them with a local ONNX model (no API
+A Rust CLI for detecting non-exact code duplication using embeddings. Inspired by [Slopo](https://github.com/rafal-qa/slopo) 
+
+`decombine` indexes code units with Tree-sitter, embeds them with a local ONNX model (no API
 keys), stores everything in a single SQLite file, and writes Markdown reports.
 
-This is a Rust replacement for the upstream [Slopo](https://github.com/rafal-qa/slopo)
-project. Upstream is AGPL-3.0-or-later and is treated as behavioral research
-only (kept under `_upstream/`, ignored by git); no upstream implementation
-code is copied here. The repository license is still an open decision — see
-`PLAN.md`.
+## Installation
+
+Clone and run `cargo install --path decombine` (will be published to Crates.io later)
 
 ## Commands
 
@@ -44,13 +42,6 @@ Ruby, Rust, TypeScript. Adding a language is mostly declarative: a parser crate 
 For comparing two codebases (e.g. a rewrite against the original), declare
 labeled `projects` in the config, index and embed both, then run
 `decombine compare --left v1 --right v2`.
-
-More documentation:
-
-- `architecture.md` — design and upstream analysis
-- `PLAN.md` — implementation plan and open decisions
-- `docs/packaging.md` — release builds, model cache, offline use
-- `docs/benchmarks.md` — baseline measurements and default-model notes
 
 ## Development
 

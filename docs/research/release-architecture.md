@@ -116,8 +116,7 @@ suffixes; installers and binstall parse triples.
 ## Blockers before first public release
 
 - **License is still undecided** (`Cargo.toml` has `publish = false` and
-  an open note). A GitHub release requires choosing one; upstream Slopo
-  is AGPL and untouched, but our own license choice gates everything.
+  an open note). 
 - macOS/Windows builds have never been produced or smoke-tested
   (PLAN.md Phase 10); dist's CI matrix is the cheapest way to get them.
 

@@ -44,6 +44,9 @@ pub enum Command {
     /// Compare embeddings between two databases (e.g. a CPU baseline vs an
     /// accelerator build) and gate on drift. Exits non-zero if the gate fails.
     Drift(DriftArgs),
+    /// Machine-friendly queries over the indexed database (stable unit IDs,
+    /// metadata filters, vector neighbors, semantic search).
+    Query(QueryArgs),
 }
 
 #[derive(Debug, Args)]
@@ -95,6 +98,14 @@ pub struct IndexArgs {
 pub struct AnalyzeArgs {
     #[command(subcommand)]
     pub analysis: Option<AnalysisCommand>,
+    /// Emit a machine-readable JSON report on stdout instead of writing the
+    /// markdown report directory. Progress stays on stderr.
+    #[arg(long, global = true)]
+    pub json: bool,
+    /// Cap top-level result items in --json output (the summary always
+    /// reports the full matched count and whether more results exist).
+    #[arg(long, global = true)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -113,6 +124,116 @@ pub struct CompareArgs {
     /// Label of the candidate project (defaults to comparison.right in config).
     #[arg(long)]
     pub right: Option<String>,
+    /// Emit a machine-readable JSON report on stdout instead of writing the
+    /// markdown report directory. Progress stays on stderr.
+    #[arg(long)]
+    pub json: bool,
+    /// Cap match records in --json output (the summary always reports the
+    /// full matched count and whether more results exist).
+    #[arg(long)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Args)]
+pub struct QueryArgs {
+    #[command(subcommand)]
+    pub command: QueryCommand,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum QueryCommand {
+    /// Report what this config/database can answer (projects, languages,
+    /// model, embedding freshness, available analyzers).
+    Capabilities(CapabilitiesArgs),
+    /// Resolve a `unit:<id>` selector to its metadata (and optionally source).
+    Inspect(InspectArgs),
+    /// List indexed code units, filtered by metadata.
+    Units(UnitsArgs),
+    /// Vector neighbors of an indexed unit, best first.
+    Similar(SimilarArgs),
+    /// Semantic search over indexed units from a natural-language query
+    /// (embeds the query with the configured model).
+    Search(SearchArgs),
+    /// Query by example: nearest neighbors of a known unit (same engine as
+    /// `similar`, the workflow name agents know it by).
+    Qbe(SimilarArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CapabilitiesArgs {
+    /// Emit JSON on stdout instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct InspectArgs {
+    /// Unit selector, e.g. `unit:0123456789abcdef`.
+    pub selector: String,
+    /// Include the unit's source text (stored display source, or recovered
+    /// from the project source tree by byte range).
+    #[arg(long)]
+    pub source: bool,
+    /// Emit JSON on stdout instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct UnitsArgs {
+    /// Metadata filter, e.g. 'language=rust kind=function path=src/**'.
+    /// Keys AND together, repeating a key ORs its values; `path`, `name`,
+    /// and `scope` accept globs; `min_nodes=N` gates body size.
+    #[arg(long)]
+    pub r#where: Option<String>,
+    /// Maximum units to return (default: all).
+    #[arg(long)]
+    pub limit: Option<usize>,
+    /// Emit JSON on stdout instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SimilarArgs {
+    /// Query unit selector, e.g. `unit:0123456789abcdef`.
+    #[arg(long)]
+    pub unit: String,
+    /// Maximum neighbors to return.
+    #[arg(long, default_value_t = 20, visible_alias = "neighbors")]
+    pub limit: usize,
+    /// Only return neighbors with cosine >= this raw score. Raw cosines do
+    /// not port across models; omit to rank without a cutoff.
+    #[arg(long)]
+    pub threshold: Option<f32>,
+    /// Metadata filter applied to candidate neighbors (see `query units`).
+    #[arg(long)]
+    pub r#where: Option<String>,
+    /// Attach inline score/decision explanations to each result.
+    #[arg(long)]
+    pub why: bool,
+    /// Emit JSON on stdout instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    /// Natural-language query text.
+    #[arg(long)]
+    pub text: String,
+    /// Maximum results to return.
+    #[arg(long, default_value_t = 20)]
+    pub limit: usize,
+    /// Metadata filter applied to candidate units (see `query units`).
+    #[arg(long)]
+    pub r#where: Option<String>,
+    /// Attach inline score/evidence explanations to each result.
+    #[arg(long)]
+    pub why: bool,
+    /// Emit JSON on stdout instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

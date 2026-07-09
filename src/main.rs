@@ -13,8 +13,8 @@ use decombine::analyze::drift::{DriftReport, DriftSide, compute_drift};
 use decombine::analyze::duplicate::{DuplicateAnalyzer, ignore::load_ignored_hashes};
 use decombine::analyze::{AnalysisContext, Analyzer};
 use decombine::cli::{
-    AnalysisCommand, Cli, Command, CompareArgs, DoctorArgs, DriftArgs, LanguagesCommand,
-    ModelsCommand,
+    AnalysisCommand, AnalyzeArgs, Cli, Command, CompareArgs, DoctorArgs, DriftArgs,
+    LanguagesCommand, ModelsCommand, QueryCommand,
 };
 use decombine::config::{CONFIG_TEMPLATE, Config};
 use decombine::db::Db;
@@ -151,36 +151,44 @@ fn load_embedder_with_progress(config: &Config) -> Result<Box<dyn decombine::emb
     )
 }
 
-fn analyze_duplicates(config: &Config, db: &Db) -> Result<()> {
+fn analyze_duplicates(config: &Config, db: &Db, args: &AnalyzeArgs) -> Result<()> {
     let ctx = AnalysisContext::load(db, &[])?;
     let analyzer = DuplicateAnalyzer {
         ignored_hashes: load_ignored_hashes(&config.ignore_file)?,
     };
     let output = analyzer.run(&ctx, &config.analysis)?;
-    report::clean_report_dir(&config.report_dir)?;
-    report::write_duplicate_report(
-        &config.report_dir,
-        &report_meta(config, db, &ctx),
-        &ctx,
-        &output,
-    )?;
+    if args.json {
+        let value =
+            report::json::duplicate_json(&report_meta(config, db, &ctx), &ctx, &output, args.limit);
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        report::clean_report_dir(&config.report_dir)?;
+        report::write_duplicate_report(
+            &config.report_dir,
+            &report_meta(config, db, &ctx),
+            &ctx,
+            &output,
+        )?;
+    }
     db.create_analysis_run(
         "duplicates",
         ctx.model_id,
         &project_scope(&ctx),
         &serde_json::to_string(&config.analysis)?,
     )?;
-    println!(
-        "{} clusters ({} ignored), {} cross-directory candidates → {}",
-        output.clusters.len(),
-        output.ignored.len(),
-        output.cross_directory.len(),
-        config.report_dir.display()
-    );
+    if !args.json {
+        println!(
+            "{} clusters ({} ignored), {} cross-directory candidates → {}",
+            output.clusters.len(),
+            output.ignored.len(),
+            output.cross_directory.len(),
+            config.report_dir.display()
+        );
+    }
     Ok(())
 }
 
-fn analyze_concerns(config: &Config, db: &Db) -> Result<()> {
+fn analyze_concerns(config: &Config, db: &Db, args: &AnalyzeArgs) -> Result<()> {
     if config.analysis.concerns.queries.is_empty() {
         bail!("no concern queries configured under `analysis.concerns.queries`");
     }
@@ -190,23 +198,31 @@ fn analyze_concerns(config: &Config, db: &Db) -> Result<()> {
         embedder: embedder.as_mut(),
     };
     let output = analyzer.run_mut(&ctx, &config.analysis.concerns)?;
-    report::write_concern_report(
-        &config.report_dir,
-        &report_meta(config, db, &ctx),
-        &ctx,
-        &output,
-    )?;
+    if args.json {
+        let value =
+            report::json::concern_json(&report_meta(config, db, &ctx), &ctx, &output, args.limit);
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        report::write_concern_report(
+            &config.report_dir,
+            &report_meta(config, db, &ctx),
+            &ctx,
+            &output,
+        )?;
+    }
     db.create_analysis_run(
         "concerns",
         ctx.model_id,
         &project_scope(&ctx),
         &serde_json::to_string(&config.analysis.concerns)?,
     )?;
-    println!(
-        "{} candidate concerns → {}/concerns",
-        output.findings.len(),
-        config.report_dir.display()
-    );
+    if !args.json {
+        println!(
+            "{} candidate concerns → {}/concerns",
+            output.findings.len(),
+            config.report_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -230,25 +246,37 @@ fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
     let output = analyzer.run_with_progress(&ctx, &comparison, |phase| {
         eprintln!("compare: {phase}");
     })?;
-    report::write_comparison_report(
-        &config.report_dir,
-        &report_meta(config, db, &ctx),
-        &ctx,
-        &output,
-    )?;
+    if args.json {
+        let value = report::json::comparison_json(
+            &report_meta(config, db, &ctx),
+            &ctx,
+            &output,
+            args.limit,
+        );
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        report::write_comparison_report(
+            &config.report_dir,
+            &report_meta(config, db, &ctx),
+            &ctx,
+            &output,
+        )?;
+    }
     db.create_analysis_run(
         "compare",
         ctx.model_id,
         &project_scope(&ctx),
         &serde_json::to_string(&comparison)?,
     )?;
-    println!(
-        "compared `{}` vs `{}`: {} match records → {}/compare",
-        output.left_label,
-        output.right_label,
-        output.matches.len(),
-        config.report_dir.display()
-    );
+    if !args.json {
+        println!(
+            "compared `{}` vs `{}`: {} match records → {}/compare",
+            output.left_label,
+            output.right_label,
+            output.matches.len(),
+            config.report_dir.display()
+        );
+    }
     Ok(())
 }
 
@@ -533,8 +561,8 @@ fn main() -> Result<()> {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
             match args.analysis {
-                None | Some(AnalysisCommand::Duplicates) => analyze_duplicates(&config, &db),
-                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db),
+                None | Some(AnalysisCommand::Duplicates) => analyze_duplicates(&config, &db, args),
+                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db, args),
             }
         }
         Command::Compare(args) => {
@@ -546,8 +574,17 @@ fn main() -> Result<()> {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
             let stats = indexer::index(&db, &config, None)?;
+            // In --json mode stdout carries data only; pipeline progress
+            // moves to stderr.
+            let info = |line: String| {
+                if args.json {
+                    eprintln!("{line}");
+                } else {
+                    println!("{line}");
+                }
+            };
             for project in &stats {
-                println!(
+                info(format!(
                     "{}: indexed={} skipped={} removed={} failed={} units_indexed={} units_total={}",
                     project.label,
                     project.indexed,
@@ -556,7 +593,7 @@ fn main() -> Result<()> {
                     project.failed,
                     project.units,
                     project.total_units
-                );
+                ));
             }
             let mut embedder = decombine::embed::embedder_from_config(&config)?;
             let embed_stats = decombine::embed::embed_pending_with_progress(
@@ -565,21 +602,37 @@ fn main() -> Result<()> {
                 &config,
                 print_embed_progress,
             )?;
-            println!(
+            info(format!(
                 "embedded {} new bodies in {} batches ({} unresolved)",
                 embed_stats.embedded, embed_stats.batches, embed_stats.unresolved
-            );
-            print_token_stats(&embed_stats.tokens);
+            ));
+            if !args.json {
+                print_token_stats(&embed_stats.tokens);
+            }
             drop(embedder);
             match args.analysis {
                 None | Some(AnalysisCommand::Duplicates) => {
-                    analyze_duplicates(&config, &db)?;
-                    if config.analysis.concerns.enabled {
-                        analyze_concerns(&config, &db)?;
+                    analyze_duplicates(&config, &db, args)?;
+                    if config.analysis.concerns.enabled && !args.json {
+                        analyze_concerns(&config, &db, args)?;
                     }
                     Ok(())
                 }
-                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db),
+                Some(AnalysisCommand::Concerns) => analyze_concerns(&config, &db, args),
+            }
+        }
+        Command::Query(args) => {
+            let config = Config::load(&cli.config)?;
+            let db = decombine::db::open_or_create(&config.db_file)?;
+            match &args.command {
+                QueryCommand::Capabilities(args) => {
+                    decombine::query::capabilities(&config, &cli.config, &db, args)
+                }
+                QueryCommand::Inspect(args) => decombine::query::inspect(&db, args),
+                QueryCommand::Units(args) => decombine::query::units(&db, args),
+                QueryCommand::Similar(args) => decombine::query::similar(&db, args, "similar"),
+                QueryCommand::Qbe(args) => decombine::query::similar(&db, args, "qbe"),
+                QueryCommand::Search(args) => decombine::query::search(&config, &db, args),
             }
         }
     }

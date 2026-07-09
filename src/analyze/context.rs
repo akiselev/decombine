@@ -52,26 +52,71 @@ pub trait Analyzer {
     fn run(&self, ctx: &AnalysisContext, config: &Self::Config) -> Result<Self::Output>;
 }
 
+/// Load selected projects (empty = all) and their code units without
+/// requiring embeddings. Used by metadata-only query commands; the full
+/// `AnalysisContext::load` builds on it.
+pub fn load_projects_and_units(
+    db: &Db,
+    project_labels: &[String],
+) -> Result<(Vec<Project>, Vec<CodeUnitRef>)> {
+    let all_projects = db.list_projects()?;
+    let projects: Vec<Project> = if project_labels.is_empty() {
+        all_projects
+    } else {
+        let mut selected = Vec::new();
+        for label in project_labels {
+            let project = all_projects
+                .iter()
+                .find(|p| &p.label == label)
+                .with_context(|| format!("project {label:?} is not indexed"))?;
+            selected.push(project.clone());
+        }
+        selected
+    };
+    if projects.is_empty() {
+        bail!("no indexed projects; run `decombine index` first");
+    }
+
+    // Load units for the selected projects.
+    let placeholders = projects.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT u.id, p.label, f.relative_path, u.language_id, u.kind, u.name, u.scope,
+                    u.start_byte, u.end_byte, u.start_line, u.end_line,
+                    u.body_node_count, u.normalized_body_hash, u.display_source
+             FROM code_units u
+             JOIN files f ON f.id = u.file_id
+             JOIN projects p ON p.id = f.project_id
+             WHERE p.id IN ({placeholders})
+             ORDER BY p.label, f.relative_path, u.start_byte, u.end_byte"
+    );
+    let mut stmt = db.conn().prepare(&sql)?;
+    let units: Vec<CodeUnitRef> = stmt
+        .query_map(params_from_iter(projects.iter().map(|p| p.id)), |row| {
+            Ok(CodeUnitRef {
+                id: row.get(0)?,
+                project_label: row.get(1)?,
+                relative_path: row.get(2)?,
+                language_id: row.get(3)?,
+                kind: row.get(4)?,
+                name: row.get(5)?,
+                scope: row.get(6)?,
+                start_byte: row.get::<_, i64>(7)? as usize,
+                end_byte: row.get::<_, i64>(8)? as usize,
+                start_line: row.get::<_, i64>(9)? as usize,
+                end_line: row.get::<_, i64>(10)? as usize,
+                body_node_count: row.get::<_, i64>(11)? as usize,
+                normalized_body_hash: row.get(12)?,
+                display_source: row.get(13)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((projects, units))
+}
+
 impl AnalysisContext {
     /// Load the context for the given project labels (empty = all).
     pub fn load(db: &Db, project_labels: &[String]) -> Result<AnalysisContext> {
-        let all_projects = db.list_projects()?;
-        let projects: Vec<Project> = if project_labels.is_empty() {
-            all_projects
-        } else {
-            let mut selected = Vec::new();
-            for label in project_labels {
-                let project = all_projects
-                    .iter()
-                    .find(|p| &p.label == label)
-                    .with_context(|| format!("project {label:?} is not indexed"))?;
-                selected.push(project.clone());
-            }
-            selected
-        };
-        if projects.is_empty() {
-            bail!("no indexed projects; run `decombine index` first");
-        }
+        let (projects, units) = load_projects_and_units(db, project_labels)?;
 
         // The analysis model: exactly one embedding model may exist per
         // database (enforced by the embed pipeline's immutable settings).
@@ -81,40 +126,6 @@ impl AnalysisContext {
             [model] => model.clone(),
             _ => bail!("database contains multiple embedding models; this is unsupported"),
         };
-
-        // Load units for the selected projects.
-        let placeholders = projects.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!(
-            "SELECT u.id, p.label, f.relative_path, u.language_id, u.kind, u.name, u.scope,
-                    u.start_byte, u.end_byte, u.start_line, u.end_line,
-                    u.body_node_count, u.normalized_body_hash, u.display_source
-             FROM code_units u
-             JOIN files f ON f.id = u.file_id
-             JOIN projects p ON p.id = f.project_id
-             WHERE p.id IN ({placeholders})
-             ORDER BY p.label, f.relative_path, u.start_byte, u.end_byte"
-        );
-        let mut stmt = db.conn().prepare(&sql)?;
-        let units: Vec<CodeUnitRef> = stmt
-            .query_map(params_from_iter(projects.iter().map(|p| p.id)), |row| {
-                Ok(CodeUnitRef {
-                    id: row.get(0)?,
-                    project_label: row.get(1)?,
-                    relative_path: row.get(2)?,
-                    language_id: row.get(3)?,
-                    kind: row.get(4)?,
-                    name: row.get(5)?,
-                    scope: row.get(6)?,
-                    start_byte: row.get::<_, i64>(7)? as usize,
-                    end_byte: row.get::<_, i64>(8)? as usize,
-                    start_line: row.get::<_, i64>(9)? as usize,
-                    end_line: row.get::<_, i64>(10)? as usize,
-                    body_node_count: row.get::<_, i64>(11)? as usize,
-                    normalized_body_hash: row.get(12)?,
-                    display_source: row.get(13)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
 
         // Load this model's embeddings once, then assign per unit by hash.
         let mut by_hash: HashMap<String, Vec<f32>> = HashMap::new();

@@ -606,3 +606,42 @@ Reran the full 10-run sweep on fresh DBs with the four method changes. Zero fail
   Default thresholds (cosine 0.9999 / recall 0.99) suit same-model
   cross-provider fp32, where near-identity is expected; loosen for int8/quantized
   accelerator paths.
+
+## 2026-07-09 CodeRankEmbed Quantization: int8 rejected, fp16 shippable
+
+- Task: TODO "CodeRankEmbed Quantization" — actually run the pipeline
+  (`scripts/coderank_onnx.py`, previously written but never executed) and decide
+  what, if anything, to ship smaller than the 548 MB fp32 default.
+- Corpus: indexed 5 OSS corpora (flask/express/gin/ripgrep/redis) at `full`
+  retention for embedding texts; the script's stratified split concentrated on
+  C (greedy alphabetical fill — a real weakness), so built a language-balanced
+  calibration (1100, 220/lang) + holdout (450, 90/lang) directly from the DB.
+  Both stages read only the `text` field, so the balanced JSONL drops straight
+  in. Verify skips the Torch gate (fp32 export already Torch-verified at cos
+  1.0) and ran with loosened gate flags to print full metrics on failures.
+- Quantize memory: static QDQ OOM-killed at max_length 2048 (the augmented
+  calibration graph materializes full attention tensors, `{4,12,1823,1823}` ≈
+  640 MB each × 24 layers) and again at 512 with the `percentile` calibrator
+  (buffers tensor values across rows). `minmax` (reduce-min/max inside the
+  session) at max_length 256 succeeded.
+- Results (int8-vs-fp32 on the balanced holdout; gate = mean cos ≥ 0.999 / min
+  ≥ 0.995 / p95 Δ ≤ 0.005 / max Δ ≤ 0.02 / top-10 recall ≥ 0.98):
+  - int8 static minmax:        139 MB, cos 0.569, recall 0.493 — broken.
+  - int8 dynamic per-tensor:   138 MB, cos 0.925, recall 0.804 — best int8,
+    still a ~20% neighbour loss; fails.
+  - int8 dynamic per-channel:  139 MB, cos 0.039, recall 0.044 — catastrophic
+    (ORT's per-channel dynamic path mishandles nomic-bert matmuls).
+  - fp16 (`onnxruntime.transformers.float16`, keep_io_types): 275 MB, cos
+    0.999998 / min 0.999914, p95 Δ 0.00022, max Δ 0.0030, recall 0.9983 —
+    near-lossless, passes with huge margin.
+- Throughput (CPU, 30 texts @256): fp32 3.6/s vs fp16 3.6/s → 1.01x (ORT CPU
+  upcasts fp16 to fp32). fp16's wins are download size (half) and GPU compute.
+- Decision: **int8 is not viable for CodeRankEmbed** at the quality bar (all
+  three variants fail; matches the prior broken-community-int8 finding). Ship
+  fp32 as the default; **fp16 is the shippable compressed variant** — half the
+  download, no measurable quality loss. The verification harness + the strict
+  gate did their job (caught the int8 regression a naive "4x smaller!" would
+  have shipped). Distribution reuses the managed-model mechanism; see
+  `docs/research/quantized-model-distribution.md`. fp16 ONNX produced at
+  `~/.cache/decombine/custom/coderankembed-fp16` (hashes recorded), pending an
+  HF upload + `MANAGED_MODELS` entry.

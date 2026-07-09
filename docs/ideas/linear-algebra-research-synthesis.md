@@ -295,8 +295,7 @@ the nice spectral behavior is real.
    flag in SQLite (`last_analyzed < last_indexed`). Future nice-to-have:
    cache `C` and apply `±` rank-1 updates (`C ← C ± x xᵀ`) per changed unit.
 
-**Pair the first module with a small labeled benchmark** (reuse Slopo
-fixtures or hand-label a few repos) so each technique is *measured*, not just
+**Pair the first module with a small labeled benchmark** so each technique is *measured*, not just
 built. Every product-value claim above is otherwise unvalidated.
 
 ## Rust crate picks (verified 2026 status)

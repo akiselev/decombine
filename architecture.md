@@ -146,7 +146,7 @@ languages:
 
 embedding:
   backend: fastembed
-  model: BGESmallENV15
+  model: CodeRankEmbed # managed: downloaded + hash-verified on first use
   cache_dir:
   batch_size: 256
   max_batch_chars: 200000
@@ -160,9 +160,9 @@ index:
   retention: report # full | report | minimal
 
 analysis:
-  candidate_threshold: 0.88
-  similarity_threshold: 0.92
-  rerank_threshold: 0.94
+  candidate_threshold: 0.70 # CodeRankEmbed scale; BGE used 0.88/0.92/0.94
+  similarity_threshold: 0.81
+  rerank_threshold: 0.85
   block_size: 1000
   body_node_count_threshold: 10
   min_semantic_body_node_count: 20
@@ -612,6 +612,15 @@ Improvements:
 - Include copyable ignore commands or hash-only block.
 - Include the configured retention mode so users know whether report source came from the database or from rereading files.
 - Make output deterministic for tests.
+
+Agent-facing machine output (shipped 2026-07-09, see
+`docs/research/agent-query-interface.md`): every analyzer gains `--json`
+(bounded envelope on stdout, progress on stderr) with `--limit` plus honest
+`exhaustive`/`has_more` reporting, serialized in `src/report/json.rs` beside
+the markdown renderer. `src/query/` adds the `decombine query` family —
+`capabilities`, `inspect`, `units` (with `--where` metadata filters),
+`similar`, `search`, and `qbe` — over stable per-index-generation
+`unit:<hash>` selectors shared by all machine surfaces.
 
 ## Dependencies To Start
 

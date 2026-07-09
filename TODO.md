@@ -1,5 +1,19 @@
 # TODO
 
+## Agent Query Interface (core shipped 2026-07-09)
+
+Steps 1–3 of `docs/research/agent-query-interface.md` landed: analyzer
+`--json`/`--limit` envelopes with stable `unit:`/`cluster:`/`match:` IDs
+(`src/report/json.rs`), and `decombine query`
+capabilities/inspect/units/similar/search/qbe (`src/query/`). Remaining,
+deferred until real agent usage demands them:
+
+- JSONL event streams (`--jsonl`, `--progress jsonl`) for large result sets.
+- `decombine schema <name>` returning JSON Schema for each envelope.
+- Exit-code policy table and `--fail-on` (findings currently never fail).
+- Step 4 graph expansion (`same_file`/`similar`/`duplicate`/`compare_match`/
+  `concern_hit` edges over existing analyzer data).
+
 ## OSS Sweep v2 Residuals (2026-07-08) — resolved 2026-07-08, see EXPERIMENTS.md
 
 - ~~Rust closure naming~~ DONE: `rust` adapter (let-binding / call-argument),

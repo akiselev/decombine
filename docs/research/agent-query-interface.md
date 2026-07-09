@@ -2,8 +2,12 @@
 
 Date: 2026-07-08 (scope decisions recorded 2026-07-09)
 
-Status: research synthesis, reviewed and descoped. No implementation has
-started.
+Status: research synthesis, reviewed and descoped. The in-scope core
+(roadmap Steps 1–3) shipped 2026-07-09: analyzer `--json`/`--limit` output
+(`src/report/json.rs`) and the `decombine query`
+capabilities/inspect/units/similar/search/qbe family (`src/query/`).
+Step 4 (graph expansion), JSONL streaming, the `schema` command, and the
+exit-code/`--fail-on` policy remain unimplemented.
 
 Scope decisions (2026-07-09, see Decisions at the bottom):
 

@@ -30,7 +30,6 @@ Tasks:
 - Add baseline dependencies: CLI, config parsing, errors, SQLite, hashing, path scanning, Tree-sitter, tests.
 - Add CI commands locally documented in `README.md`.
 - Add license once chosen.
-- Keep `_upstream/slopo` as ignored research material.
 
 Acceptance:
 

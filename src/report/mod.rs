@@ -1,4 +1,5 @@
 pub mod filesystem;
+pub mod json;
 pub mod markdown;
 
 pub use filesystem::clean_report_dir;

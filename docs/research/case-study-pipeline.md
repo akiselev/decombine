@@ -314,8 +314,6 @@ bodies), so license discipline is load-bearing, not cosmetic:
   (MIT / Apache-2.0 / BSD-2/3 / ISC / MPL-2.0-with-care). This is the single
   choke point — if a repo can't clear it, its source never reaches an embed,
   a report, or the site.
-- Never pull corpora from `_upstream/` or any AGPL/GPL source (Slopo is
-  research-only, never published).
 - The LLM prompt is told the excerpts are permissively licensed and to
   attribute each repo (name, license, SHA) — the "Try it yourself" footer
   already carries provenance.
