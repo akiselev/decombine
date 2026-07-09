@@ -1,6 +1,6 @@
 # Cluster 1 — `5946569cd5430ef8`
 
-3 units, top similarity 1.0000 (boosted 1.0600). Ignore with:
+3 units (Product code clusters), top similarity 1.0000 (boosted 1.0600). Ignore with:
 
 ```
 5946569cd5430ef8

@@ -23,6 +23,14 @@ pub trait Embedder {
     fn max_sequence_length(&self) -> usize {
         512
     }
+    /// Exact token count for one input using the model's own tokenizer,
+    /// when the backend can provide it. Measured on the OSS eval corpora,
+    /// the chars/4 fallback underestimates real token counts by 1.3–2.3x
+    /// in padded area (Go worst), which is exactly the margin by which
+    /// embed runs overshot the token-area memory budget.
+    fn count_tokens(&self, _text: &str) -> Option<usize> {
+        None
+    }
     fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>>;
 }
 
@@ -43,6 +51,58 @@ pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
     }
 }
 
+/// Accelerator execution providers decombine can request, in priority order.
+pub const ACCELERATOR_PROVIDERS: &[&str] = &["cuda", "directml", "coreml", "openvino"];
+
+/// One provider's readiness, as reported by `doctor`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderDiag {
+    pub name: &'static str,
+    /// This binary was built with the provider's cargo feature.
+    pub compiled: bool,
+    /// ONNX Runtime was built with support for the provider (`None` when not
+    /// compiled in, so it cannot be queried).
+    pub available: Option<bool>,
+    /// The provider can run on this OS/arch at all.
+    pub platform_supported: Option<bool>,
+}
+
+/// Compile- and runtime status of each accelerator provider. On a CPU-only
+/// build every provider reports `compiled: false`; with `accel` features the
+/// ONNX Runtime availability and platform support are queried live.
+pub fn accelerator_diagnostics() -> Vec<ProviderDiag> {
+    #[cfg(feature = "accel")]
+    {
+        use ort::ep::{CUDA, CoreML, DirectML, ExecutionProvider, OpenVINO};
+        fn diag(name: &'static str, compiled: bool, ep: &dyn ExecutionProvider) -> ProviderDiag {
+            ProviderDiag {
+                name,
+                compiled,
+                available: Some(ep.is_available().unwrap_or(false)),
+                platform_supported: Some(ep.supported_by_platform()),
+            }
+        }
+        vec![
+            diag("cuda", cfg!(feature = "cuda"), &CUDA::default()),
+            diag("directml", cfg!(feature = "directml"), &DirectML::default()),
+            diag("coreml", cfg!(feature = "coreml"), &CoreML::default()),
+            diag("openvino", cfg!(feature = "openvino"), &OpenVINO::default()),
+        ]
+    }
+    #[cfg(not(feature = "accel"))]
+    {
+        ACCELERATOR_PROVIDERS
+            .iter()
+            .map(|name| ProviderDiag {
+                name,
+                compiled: false,
+                available: None,
+                platform_supported: None,
+            })
+            .collect()
+    }
+}
+
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct EmbedStats {
     /// Distinct body hashes pending at the start of this run.
@@ -53,6 +113,65 @@ pub struct EmbedStats {
     /// `minimal`/`report` retention).
     pub unresolved: usize,
     pub batches: usize,
+    /// Token-length instrumentation over embedded inputs (post-truncation
+    /// counts from the packer).
+    pub tokens: TokenStats,
+}
+
+/// Distribution of input token lengths plus padding/truncation costs, using
+/// the same counts the batch packer budgets with.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct TokenStats {
+    /// Sorted at read time via `percentile`; append-only during the run.
+    lengths: Vec<usize>,
+    /// Inputs at the model's truncation length (content beyond it is lost).
+    pub truncated: usize,
+    /// Sum of real token positions across inputs.
+    pub token_positions: u64,
+    /// Sum of padded positions actually materialized per batch
+    /// (`batch_len * longest_in_batch`).
+    pub padded_positions: u64,
+}
+
+impl TokenStats {
+    fn record_batch(&mut self, tokens: impl Iterator<Item = usize> + Clone, max_len: usize) {
+        let longest = tokens.clone().max().unwrap_or(0);
+        let mut count = 0_u64;
+        for t in tokens {
+            self.lengths.push(t);
+            self.token_positions += t as u64;
+            if t >= max_len {
+                self.truncated += 1;
+            }
+            count += 1;
+        }
+        self.padded_positions += count * longest as u64;
+    }
+
+    pub fn percentile(&self, q: f64) -> usize {
+        if self.lengths.is_empty() {
+            return 0;
+        }
+        let mut sorted = self.lengths.clone();
+        sorted.sort_unstable();
+        sorted[((q * (sorted.len() - 1) as f64).round() as usize).min(sorted.len() - 1)]
+    }
+
+    pub fn max(&self) -> usize {
+        self.lengths.iter().copied().max().unwrap_or(0)
+    }
+
+    pub fn count(&self) -> usize {
+        self.lengths.len()
+    }
+
+    /// Fraction of materialized positions that are padding.
+    pub fn padding_waste(&self) -> f64 {
+        if self.padded_positions == 0 {
+            return 0.0;
+        }
+        1.0 - self.token_positions as f64 / self.padded_positions as f64
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -119,18 +238,33 @@ pub fn embed_pending_with_progress(
         }
         // Pack length-sorted items so every batch's padded token area
         // (count x longest-item-tokens^2, the term ONNX attention memory
-        // scales with) stays under budget. Hash order only matters for the
-        // page cursor above, not within a page.
-        resolved.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then(a.0.cmp(&b.0)));
+        // scales with) stays under budget. Token counts come from the
+        // model's own tokenizer when available — the chars/4 estimate
+        // undershoots real counts enough to blow the budget. Hash order
+        // only matters for the page cursor above, not within a page.
+        let max_sequence_length = embedder.max_sequence_length();
+        let mut sized: Vec<(String, String, usize)> = resolved
+            .into_iter()
+            .map(|(hash, text)| {
+                let tokens = embedder
+                    .count_tokens(&text)
+                    .unwrap_or_else(|| estimated_tokens(&text, max_sequence_length))
+                    .min(max_sequence_length.max(1));
+                (hash, text, tokens)
+            })
+            .collect();
+        sized.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)));
 
         for batch in pack_batches(
-            &resolved,
+            &sized,
             config.embedding.batch_size,
             config.embedding.max_batch_chars,
             config.embedding.max_batch_token_area,
-            embedder.max_sequence_length(),
         ) {
-            let texts: Vec<String> = batch.iter().map(|(_, text)| text.clone()).collect();
+            stats
+                .tokens
+                .record_batch(batch.iter().map(|(_, _, t)| *t), max_sequence_length);
+            let texts: Vec<String> = batch.iter().map(|(_, text, _)| text.clone()).collect();
             let vectors = embedder.embed(&texts)?;
             anyhow::ensure!(
                 vectors.len() == batch.len(),
@@ -138,7 +272,7 @@ pub fn embed_pending_with_progress(
                 vectors.len(),
                 batch.len()
             );
-            for ((hash, _), mut vector) in batch.iter().zip(vectors) {
+            for ((hash, _, _), mut vector) in batch.iter().zip(vectors) {
                 anyhow::ensure!(
                     vector.len() == identity.dimensions,
                     "model {} returned {} dimensions, expected {}",
@@ -176,27 +310,26 @@ fn estimated_tokens(text: &str, max_sequence_length: usize) -> usize {
     (text.chars().count() / 4 + 1).min(max_sequence_length.max(1))
 }
 
-/// Split items into batches bounded by item count, total characters, and
-/// padded token area. ONNX runtime pads every input to the longest in the
-/// batch and materializes attention over it, so peak memory scales with
-/// `count * longest_tokens^2`; that product is what `max_token_area` caps.
-/// Items must be sorted longest-first so the running maximum is the first
-/// item and long bodies batch together instead of inflating short ones.
+/// Split (hash, text, tokens) items into batches bounded by item count,
+/// total characters, and padded token area. ONNX runtime pads every input
+/// to the longest in the batch and materializes attention over it, so peak
+/// memory scales with `count * longest_tokens^2`; that product is what
+/// `max_token_area` caps. Items must be sorted longest-first so the running
+/// maximum is the first item and long bodies batch together instead of
+/// inflating short ones.
 fn pack_batches(
-    items: &[(String, String)],
+    items: &[(String, String, usize)],
     max_items: usize,
     max_chars: usize,
     max_token_area: usize,
-    max_sequence_length: usize,
-) -> Vec<&[(String, String)]> {
+) -> Vec<&[(String, String, usize)]> {
     let mut batches = Vec::new();
     let mut start = 0;
     let mut chars = 0;
     let mut longest_tokens = 0;
-    for (index, (_, text)) in items.iter().enumerate() {
+    for (index, (_, text, tokens)) in items.iter().enumerate() {
         let len = text.chars().count();
-        let tokens = estimated_tokens(text, max_sequence_length);
-        let longest = longest_tokens.max(tokens);
+        let longest = longest_tokens.max(*tokens);
         let at_capacity = index > start
             && (index - start >= max_items
                 || chars + len > max_chars
@@ -208,7 +341,7 @@ fn pack_batches(
             longest_tokens = 0;
         }
         chars += len;
-        longest_tokens = longest_tokens.max(tokens);
+        longest_tokens = longest_tokens.max(*tokens);
     }
     if start < items.len() {
         batches.push(&items[start..]);
@@ -269,28 +402,34 @@ fn recover_texts_from_source(
 mod tests {
     use super::*;
 
-    fn pairs(sizes: &[usize]) -> Vec<(String, String)> {
+    /// Items sized in chars, tokens derived with the chars/4 estimate
+    /// clamped at 500 — mirrors the fallback path.
+    fn pairs(sizes: &[usize]) -> Vec<(String, String, usize)> {
         sizes
             .iter()
             .enumerate()
-            .map(|(i, len)| (format!("h{i}"), "x".repeat(*len)))
+            .map(|(i, len)| {
+                let text = "x".repeat(*len);
+                let tokens = estimated_tokens(&text, 500);
+                (format!("h{i}"), text, tokens)
+            })
             .collect()
     }
 
     #[test]
     fn batches_respect_item_and_char_limits() {
         let items = pairs(&[10, 10, 10, 10, 10]);
-        let by_count = pack_batches(&items, 2, 1000, usize::MAX, 512);
+        let by_count = pack_batches(&items, 2, 1000, usize::MAX);
         assert_eq!(by_count.len(), 3);
         assert_eq!(by_count[0].len(), 2);
         assert_eq!(by_count[2].len(), 1);
 
-        let by_chars = pack_batches(&items, 100, 25, usize::MAX, 512);
+        let by_chars = pack_batches(&items, 100, 25, usize::MAX);
         assert_eq!(by_chars.len(), 3, "10+10 fits, third overflows 25");
 
         // A single oversized item still forms its own batch.
         let big = pairs(&[500]);
-        assert_eq!(pack_batches(&big, 10, 25, usize::MAX, 512).len(), 1);
+        assert_eq!(pack_batches(&big, 10, 25, usize::MAX).len(), 1);
     }
 
     #[test]
@@ -298,7 +437,7 @@ mod tests {
         // 2000 chars ~ 501 tokens, clamped to 500 -> area 250_000 per item.
         // Budget 1_000_000 fits four such items per batch.
         let items = pairs(&[2000, 2000, 2000, 2000, 2000, 2000]);
-        let batches = pack_batches(&items, 100, usize::MAX, 1_000_000, 500);
+        let batches = pack_batches(&items, 100, usize::MAX, 1_000_000);
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 4);
         assert_eq!(batches[1].len(), 2);
@@ -308,13 +447,38 @@ mod tests {
         let mut sizes = vec![2000usize];
         sizes.extend(std::iter::repeat_n(100, 20));
         let mixed = pairs(&sizes);
-        let batches = pack_batches(&mixed, 100, usize::MAX, 1_000_000, 500);
+        let batches = pack_batches(&mixed, 100, usize::MAX, 1_000_000);
         assert_eq!(batches[0].len(), 4, "long head limits the first batch");
         assert_eq!(batches.len(), 2, "short tail packs into one batch");
 
         // A single item over budget still embeds alone.
         let big = pairs(&[4000]);
-        assert_eq!(pack_batches(&big, 10, usize::MAX, 1000, 500).len(), 1);
+        assert_eq!(pack_batches(&big, 10, usize::MAX, 1000).len(), 1);
+
+        // Exact token counts override any char-based intuition: 100-char
+        // items reported as 500 tokens each pack like long items.
+        let dense: Vec<(String, String, usize)> = (0..6)
+            .map(|i| (format!("d{i}"), "y".repeat(100), 500))
+            .collect();
+        let batches = pack_batches(&dense, 100, usize::MAX, 1_000_000);
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].len(), 4);
+    }
+
+    #[test]
+    fn token_stats_percentiles_truncation_and_waste() {
+        let mut stats = TokenStats::default();
+        // One batch padded to 500: 3 items -> 1500 padded, 1000 real.
+        stats.record_batch([500usize, 300, 200].into_iter(), 500);
+        // A dense batch with no padding.
+        stats.record_batch([100usize, 100].into_iter(), 500);
+        assert_eq!(stats.count(), 5);
+        assert_eq!(stats.truncated, 1);
+        assert_eq!(stats.max(), 500);
+        assert_eq!(stats.percentile(0.5), 200);
+        assert_eq!(stats.token_positions, 1200);
+        assert_eq!(stats.padded_positions, 1700);
+        assert!((stats.padding_waste() - (1.0 - 1200.0 / 1700.0)).abs() < 1e-9);
     }
 
     #[test]

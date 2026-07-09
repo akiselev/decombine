@@ -415,6 +415,43 @@ func TestThing(t *testing.T) {
     }
 
     #[test]
+    fn rust_cfg_test_function_gets_tests_scope() {
+        let source = r#"
+/// Doc comment between attribute and fn is fine.
+#[cfg(test)]
+fn test_flag_switch() {
+    let flag = parse_flag("--switch");
+    let value = flag.value();
+    assert_eq!(value, "on");
+}
+
+#[cfg(not(test))]
+fn production_path() {
+    let a = compute(1);
+    let b = compute(2);
+    combine(a, b);
+}
+
+fn plain() {
+    let a = compute(1);
+    let b = compute(2);
+    combine(a, b);
+}
+"#;
+        let units = extract("rust", source, 3);
+        let scopes: Vec<(&str, Option<&str>)> = units
+            .iter()
+            .map(|u| (u.name.as_str(), u.scope.as_deref()))
+            .collect();
+        assert!(
+            scopes.contains(&("test_flag_switch", Some("tests"))),
+            "scopes: {scopes:?}"
+        );
+        assert!(scopes.contains(&("production_path", None)), "{scopes:?}");
+        assert!(scopes.contains(&("plain", None)), "{scopes:?}");
+    }
+
+    #[test]
     fn nested_units_both_extracted() {
         let source = r#"
 fn outer(items: Vec<i32>) -> Vec<i32> {

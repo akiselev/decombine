@@ -1,4 +1,4 @@
 method dispatch scope=Router lines=4-12 nodes=48 hash=9431275fc83d
 closure parseQuery scope=- lines=15-23 nodes=41 hash=c2b3ac4d9afa
 closure exports.middleware scope=- lines=25-32 nodes=44 hash=b7c982cd4289
-closure <anonymous> scope=- lines=27-30 nodes=21 hash=79fe8adf7ad7
+closure res.on("finish") scope=- lines=27-30 nodes=21 hash=79fe8adf7ad7

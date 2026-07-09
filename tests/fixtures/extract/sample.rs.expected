@@ -1,3 +1,5 @@
 function add_batch scope=Counter lines=9-19 nodes=28 hash=6e55bd7bac34
 function summarize scope=- lines=22-37 nodes=87 hash=d66de1e53743
-closure <anonymous> scope=- lines=30-34 nodes=13 hash=7cf9016f28e1
+closure iter().map(...) scope=- lines=30-34 nodes=13 hash=7cf9016f28e1
+function normalize scope=- lines=39-47 nodes=41 hash=ff98b447796b
+closure clamp scope=- lines=40-43 nodes=15 hash=204bde6914ae

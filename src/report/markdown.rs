@@ -192,11 +192,13 @@ pub fn write_duplicate_report(
                 .take(3)
                 .map(|&m| display_name(&ctx.units[m]))
                 .collect();
-            let suffix = if cluster.members.len() > 3 {
-                ", ..."
-            } else {
-                ""
-            };
+            let mut suffix = String::new();
+            if cluster.members.len() > 3 {
+                suffix.push_str(", ...");
+            }
+            if let Some(name) = &cluster.name_family {
+                let _ = write!(suffix, " — same-name family (`{name}`), likely idiom");
+            }
             let _ = writeln!(
                 index,
                 "| {n} | [`{hash}`](cluster-{n:02}.md) | {units} | {raw:.4} | {boosted:.4} | {names}{suffix} |",
@@ -276,6 +278,15 @@ pub fn write_duplicate_report(
             cluster.top_boosted
         );
         let _ = writeln!(page, "```\n{}\n```\n", cluster.hash);
+        if let Some(name) = &cluster.name_family {
+            let _ = writeln!(
+                page,
+                "Same-name family: `{name}` repeated across {} units — often \
+                 an intentional trait/interface idiom rather than refactorable \
+                 duplication.\n",
+                cluster.members.len()
+            );
+        }
 
         let _ = writeln!(page, "## Top pairs\n");
         for pair in cluster.pairs.iter().take(5) {

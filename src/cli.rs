@@ -36,7 +36,16 @@ pub enum Command {
     /// Embedding model commands.
     Models(ModelsArgs),
     /// Diagnose parser, model, and storage health.
-    Doctor,
+    Doctor(DoctorArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Run a live embedding smoke test with this execution provider,
+    /// overriding `embedding.execution_provider` for the check. Downloads the
+    /// configured model on first use and reports the provider actually used.
+    #[arg(long)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Args)]

@@ -68,6 +68,11 @@ pub struct Cluster {
     /// Exact-copy folding: one entry per distinct body hash.
     pub exact_groups: Vec<ExactGroup>,
     pub kind: ClusterKind,
+    /// The dominant unit name when this cluster is a same-name family
+    /// across many scopes (trait/interface impls like `Flag::update`) —
+    /// correctly matched but usually intentional idiom, so it orders after
+    /// other clusters in its section.
+    pub name_family: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -148,6 +153,7 @@ impl Analyzer for DuplicateAnalyzer {
         clusters.sort_by(|x, y| {
             x.kind
                 .cmp(&y.kind)
+                .then(x.name_family.is_some().cmp(&y.name_family.is_some()))
                 .then(y.top_boosted.total_cmp(&x.top_boosted))
                 .then(x.hash.cmp(&y.hash))
         });
@@ -232,12 +238,50 @@ fn build_cluster(ctx: &AnalysisContext, members: Vec<usize>, pairs: &[RankedPair
     Cluster {
         top_raw: cluster_pairs.iter().map(|p| p.raw).fold(0.0, f32::max),
         top_boosted: cluster_pairs.iter().map(|p| p.boosted).fold(0.0, f32::max),
+        name_family: name_family(ctx, &members),
         members,
         pairs: cluster_pairs,
         hash,
         exact_groups,
         kind,
     }
+}
+
+/// A same-name family needs this many members before it reads as an
+/// interface idiom rather than duplication — flask's real `add_url_rule`
+/// triple stays below it; ripgrep's 9–16-member `Flag::update` chunks and
+/// `fmt`/`serialize` impl walls sit above it.
+const NAME_FAMILY_MIN_MEMBERS: usize = 6;
+/// Trait/interface impls repeat one method name across distinct receiver
+/// scopes; scopeless languages (C) never qualify.
+const NAME_FAMILY_MIN_SCOPES: usize = 3;
+/// Minimum fraction of members sharing the dominant name.
+const NAME_FAMILY_DOMINANT_FRACTION: f64 = 0.75;
+
+/// Detect same-name impl families: one method name repeated across many
+/// receiver/class scopes (`Flag::update` × 16, `Display::fmt` × 16). These
+/// are correctly matched near-duplicates with near-zero refactor value.
+fn name_family(ctx: &AnalysisContext, members: &[usize]) -> Option<String> {
+    if members.len() < NAME_FAMILY_MIN_MEMBERS {
+        return None;
+    }
+    let mut name_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut scopes: HashSet<&str> = HashSet::new();
+    for &member in members {
+        let unit = &ctx.units[member];
+        *name_counts.entry(unit.name.as_str()).or_default() += 1;
+        if let Some(scope) = unit.scope.as_deref() {
+            scopes.insert(scope);
+        }
+    }
+    if scopes.len() < NAME_FAMILY_MIN_SCOPES {
+        return None;
+    }
+    let (dominant, count) = name_counts.into_iter().max_by_key(|&(_, count)| count)?;
+    if (count as f64) < NAME_FAMILY_DOMINANT_FRACTION * members.len() as f64 {
+        return None;
+    }
+    Some(dominant.to_string())
 }
 
 /// Test/docs by path, or by living in an inline `tests`/`test` module

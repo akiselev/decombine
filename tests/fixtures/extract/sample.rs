@@ -36,6 +36,16 @@ pub fn summarize(values: Vec<i64>) -> (i64, i64) {
     (positives.iter().sum(), doubled.iter().sum())
 }
 
+pub fn normalize(values: &mut [i64]) {
+    let clamp = |value: i64| {
+        let bounded = value.max(-100);
+        bounded.min(100)
+    };
+    for value in values.iter_mut() {
+        *value = clamp(*value);
+    }
+}
+
 fn tiny() -> i32 {
     1
 }

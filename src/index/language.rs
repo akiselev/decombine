@@ -103,7 +103,14 @@ impl LanguageAdapter for JsLikeAdapter {
             }
             break;
         }
-        unit.name = name_from_call_argument(source, unit.node, "arguments", &["string"]);
+        unit.name =
+            name_from_call_argument(source, unit.node, "arguments", &["string"]).or_else(|| {
+                name_from_enclosing_function(
+                    source,
+                    unit.node,
+                    &["function_declaration", "method_definition"],
+                )
+            });
     }
 }
 
@@ -126,13 +133,18 @@ fn name_from_call_argument(
         return None;
     }
     let callee_node = call.child_by_field_name("function")?;
-    let callee = source[callee_node.byte_range()].trim();
-    // Deep member chains read poorly; keep the last two segments.
-    let callee: String = match callee.rmatch_indices('.').nth(1) {
-        Some((i, _)) => callee[i + 1..].to_string(),
-        None => callee.to_string(),
-    };
-    if callee.len() > 40 || callee.contains('\n') {
+    // Collapse whitespace so multiline method chains still qualify.
+    let callee: String = source[callee_node.byte_range()]
+        .split_whitespace()
+        .collect();
+    let callee = callee.strip_prefix("self.").unwrap_or(&callee);
+    // Deep member chains read poorly; keep the last two segments, or just
+    // the last when the receiver expression is itself long.
+    let mut callee = callee_tail(callee, 2);
+    if callee.len() > 40 {
+        callee = callee_tail(callee, 1);
+    }
+    if callee.len() > 40 {
         return None;
     }
     let mut label = None;
@@ -143,10 +155,14 @@ fn name_from_call_argument(
         }
         if string_kinds.contains(&child.kind()) {
             let text = source[child.byte_range()]
-                .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                // Prefix sigils (`b"..."`, `r#"..."#`) come before the quote.
+                .trim_start_matches(['b', 'r'])
+                .trim_matches(|c| c == '"' || c == '\'' || c == '`' || c == '#')
                 .trim();
             let text: String = text.chars().take(48).collect();
-            label = Some(text);
+            if !text.contains('"') {
+                label = Some(text);
+            }
             break;
         }
     }
@@ -156,19 +172,148 @@ fn name_from_call_argument(
     }
 }
 
+/// The last `keep` dot-separated segments of a callee expression, counting
+/// only dots outside any bracket pair so receiver-argument text is never
+/// split mid-parenthesis (`a.glob(&b.c).map_err` keeps `glob(&b.c).map_err`,
+/// not `c).map_err`).
+fn callee_tail(callee: &str, keep: usize) -> &str {
+    let mut depth = 0usize;
+    let mut dots = 0usize;
+    for (i, b) in callee.bytes().enumerate().rev() {
+        match b {
+            b')' | b']' | b'>' => depth += 1,
+            b'(' | b'[' | b'<' => depth = depth.saturating_sub(1),
+            b'.' if depth == 0 => {
+                dots += 1;
+                if dots == keep {
+                    return &callee[i + 1..];
+                }
+            }
+            _ => {}
+        }
+    }
+    callee
+}
+
+/// Rust: name closures from their let binding (`let f = |x| ...`) or from
+/// the call they are passed to (`aliases.sort_by_key(|a| ...)`), and give
+/// `#[cfg(test)]` functions a `tests` scope so they classify as test code
+/// even outside a `mod tests` (ripgrep writes top-level `#[cfg(test)] fn`).
+struct RustAdapter;
+
+impl LanguageAdapter for RustAdapter {
+    fn refine(&self, source: &str, unit: &mut PendingUnit<'_>) {
+        if unit.node.kind() == "function_item"
+            && unit.scope.is_none()
+            && has_cfg_test_attribute(source, unit.node)
+        {
+            unit.scope = Some("tests".to_string());
+        }
+        if unit.name.is_some() || unit.node.kind() != "closure_expression" {
+            return;
+        }
+        if let Some(parent) = unit.node.parent() {
+            let name = match parent.kind() {
+                "let_declaration" => parent.child_by_field_name("pattern"),
+                "assignment_expression" => parent.child_by_field_name("left"),
+                _ => None,
+            }
+            .map(|n| source[n.byte_range()].to_string())
+            .filter(|n| n.len() <= 40 && !n.contains('\n'));
+            if name.is_some() {
+                unit.name = name;
+                return;
+            }
+        }
+        unit.name = name_from_call_argument(
+            source,
+            unit.node,
+            "arguments",
+            &["string_literal", "raw_string_literal"],
+        );
+    }
+}
+
+/// True when a `#[cfg(...)]` attribute mentioning `test` (and not
+/// `not(test)`) sits directly above the item, skipping doc comments.
+fn has_cfg_test_attribute(source: &str, node: Node<'_>) -> bool {
+    let mut sibling = node.prev_named_sibling();
+    while let Some(current) = sibling {
+        match current.kind() {
+            "attribute_item" => {
+                let text = &source[current.byte_range()];
+                if text.starts_with("#[cfg(") && text.contains("test") && !text.contains("not(") {
+                    return true;
+                }
+            }
+            "line_comment" | "block_comment" => {}
+            _ => return false,
+        }
+        sibling = current.prev_named_sibling();
+    }
+    false
+}
+
+/// Name an otherwise-anonymous unit after the nearest enclosing named
+/// function/method declaration: `BasicAuthForRealm.func`.
+fn name_from_enclosing_function(
+    source: &str,
+    node: Node<'_>,
+    declaration_kinds: &[&str],
+) -> Option<String> {
+    let mut current = node.parent()?;
+    loop {
+        if declaration_kinds.contains(&current.kind())
+            && let Some(name) = current.child_by_field_name("name")
+        {
+            return Some(format!("{}.func", &source[name.byte_range()]));
+        }
+        current = current.parent()?;
+    }
+}
+
 /// Go: use the receiver type as the method scope, and name anonymous
-/// `func` literals from the call they are passed to (`t.Run("case", ...)`).
+/// `func` literals from their assignment (`handler := func(...) ...`), the
+/// call they are passed to (`t.Run("case", ...)`), or failing both, the
+/// enclosing named function (`return func(...)`, `go func() {...}()`).
 struct GoAdapter;
 
 impl LanguageAdapter for GoAdapter {
     fn refine(&self, source: &str, unit: &mut PendingUnit<'_>) {
         if unit.node.kind() == "func_literal" && unit.name.is_none() {
+            let assignment_name = unit.node.parent().and_then(|parent| {
+                if parent.kind() != "expression_list" || parent.named_child_count() != 1 {
+                    return None;
+                }
+                let declaration = parent.parent()?;
+                match declaration.kind() {
+                    "short_var_declaration" | "assignment_statement" => {
+                        declaration.child_by_field_name("left")
+                    }
+                    "var_spec" => declaration.child_by_field_name("name"),
+                    _ => None,
+                }
+            });
+            if let Some(name_node) = assignment_name {
+                let name = source[name_node.byte_range()].to_string();
+                if name.len() <= 40 && !name.contains('\n') {
+                    unit.name = Some(name);
+                    return;
+                }
+            }
             unit.name = name_from_call_argument(
                 source,
                 unit.node,
                 "argument_list",
                 &["interpreted_string_literal", "raw_string_literal"],
-            );
+            )
+            .or_else(|| {
+                name_from_enclosing_function(
+                    source,
+                    unit.node,
+                    &["function_declaration", "method_declaration"],
+                )
+            });
             return;
         }
         if unit.node.kind() != "method_declaration" || unit.scope.is_some() {
@@ -191,10 +336,12 @@ pub fn adapter_by_name(name: &str) -> Result<&'static dyn LanguageAdapter> {
     static PYTHON: PythonAdapter = PythonAdapter;
     static JS_LIKE: JsLikeAdapter = JsLikeAdapter;
     static GO: GoAdapter = GoAdapter;
+    static RUST: RustAdapter = RustAdapter;
     match name {
         "python" => Ok(&PYTHON),
         "js-like" => Ok(&JS_LIKE),
         "go" => Ok(&GO),
+        "rust" => Ok(&RUST),
         other => anyhow::bail!("unknown language adapter {other:?}"),
     }
 }

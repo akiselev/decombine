@@ -1,3 +1,3 @@
 method length scope=Path lines=11-20 nodes=77 hash=fee3714a51dd
 closure centroid scope=- lines=23-29 nodes=61 hash=ff409994e52a
-closure <anonymous> scope=- lines=25-25 nodes=19 hash=19d6206473c1
+closure points.reduce(...) scope=- lines=25-25 nodes=19 hash=19d6206473c1

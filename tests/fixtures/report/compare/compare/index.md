@@ -1,7 +1,8 @@
 # Comparison: `v1` (reference) vs `v2` (candidate)
 
 - Model: `fixture` backend `test` v1.0 (4 dims, provider cpu)
-- Thresholds: candidate 0.88 / similarity 0.92 / rerank 0.94
+- Comparison thresholds: candidate 0.78 / match 0.86 / top-k 5 / min nodes 0 / right fanout 0 / abtt 0
+- Hints: names on / paths on
 - Retention: report
 - Run: 2026-07-03 00:00:00Z
 - Project `v1`: /repo/v1
@@ -30,4 +31,3 @@ Semantic coverage of the reference project by the candidate. Matches are embeddi
 | Group | Left units | Covered | Possible | Missing |
 | --- | --- | --- | --- | --- |
 | `rust` | 3 | 2 | 0 | 1 |
-

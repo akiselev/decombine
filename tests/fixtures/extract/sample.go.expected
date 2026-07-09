@@ -1,3 +1,7 @@
 method Merge scope=Store lines=9-19 nodes=44 hash=73968790e136
 function Walk scope=- lines=21-35 nodes=66 hash=d8f36e6c79ce
-closure <anonymous> scope=- lines=22-28 nodes=26 hash=ba83490a4b05
+closure handler scope=- lines=22-28 nodes=26 hash=ba83490a4b05
+function MakeGreeter scope=- lines=37-45 nodes=38 hash=1d012139f5e3
+closure MakeGreeter.func scope=- lines=38-44 nodes=28 hash=c5c34a3b6165
+function RunServer scope=- lines=47-53 nodes=27 hash=99e79d16b3b4
+closure RunServer.func scope=- lines=48-52 nodes=20 hash=972e597face6

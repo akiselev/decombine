@@ -11,7 +11,9 @@ use decombine::analyze::compare::CompareAnalyzer;
 use decombine::analyze::concerns::ConcernAnalyzer;
 use decombine::analyze::duplicate::{DuplicateAnalyzer, ignore::load_ignored_hashes};
 use decombine::analyze::{AnalysisContext, Analyzer};
-use decombine::cli::{AnalysisCommand, Cli, Command, CompareArgs, LanguagesCommand, ModelsCommand};
+use decombine::cli::{
+    AnalysisCommand, Cli, Command, CompareArgs, DoctorArgs, LanguagesCommand, ModelsCommand,
+};
 use decombine::config::{CONFIG_TEMPLATE, Config};
 use decombine::db::Db;
 use decombine::index::indexer;
@@ -20,6 +22,63 @@ use decombine::report;
 
 fn project_scope(ctx: &AnalysisContext) -> Vec<String> {
     ctx.projects.iter().map(|p| p.label.clone()).collect()
+}
+
+fn run_doctor(config_path: &std::path::Path, args: &DoctorArgs) -> Result<()> {
+    let mut config = Config::load(config_path)?;
+    println!("config: ok ({})", config_path.display());
+    for project in config.resolved_projects() {
+        println!(
+            "project {}: {}",
+            project.label,
+            project.source_dir.display()
+        );
+    }
+    println!(
+        "embedding: backend={} model={} dims={}",
+        config.embedding.backend,
+        config.embedding.model,
+        config.embedding.dimensions()
+    );
+    println!(
+        "runtime: ort {} (fastembed {})",
+        option_env!("DECOMBINE_ORT_VERSION").unwrap_or("unknown"),
+        option_env!("DECOMBINE_FASTEMBED_VERSION").unwrap_or("unknown"),
+    );
+    println!(
+        "execution provider: {} (mode {})",
+        config.embedding.execution_provider,
+        config.embedding.provider_mode.as_str()
+    );
+    println!("accelerators:");
+    for diag in decombine::embed::accelerator_diagnostics() {
+        let status = if !diag.compiled {
+            "not compiled in".to_string()
+        } else {
+            match (diag.available, diag.platform_supported) {
+                (Some(true), Some(true)) => "compiled, available".to_string(),
+                (Some(true), Some(false)) => "compiled, unsupported on this platform".to_string(),
+                (Some(false), _) => "compiled, but ONNX Runtime lacks it".to_string(),
+                _ => "compiled".to_string(),
+            }
+        };
+        println!("  {}: {}", diag.name, status);
+    }
+
+    if let Some(provider) = &args.provider {
+        config.embedding.execution_provider = provider.clone();
+        config.validate()?;
+        println!("smoke test: loading model with execution_provider={provider} ...");
+        let mut embedder = decombine::embed::embedder_from_config(&config)?;
+        let vectors = embedder.embed(&["decombine execution provider smoke test".to_string()])?;
+        let dims = vectors.first().map(|v| v.len()).unwrap_or(0);
+        println!(
+            "smoke test: ok — {} dims, provider in effect: {}",
+            dims,
+            embedder.identity().execution_provider
+        );
+    }
+    Ok(())
 }
 
 fn report_meta(config: &Config, db: &Db, ctx: &AnalysisContext) -> report::ReportMeta {
@@ -191,6 +250,36 @@ fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
     Ok(())
 }
 
+/// One-line token-length summary after an embed run; silent when nothing
+/// was embedded.
+fn print_embed_progress(progress: decombine::embed::EmbedProgress) {
+    eprintln!(
+        "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
+        progress.embedded + progress.unresolved,
+        progress.pending_total,
+        progress.batches,
+        progress.current_batch,
+        progress.unresolved
+    );
+}
+
+fn print_token_stats(tokens: &decombine::embed::TokenStats) {
+    if tokens.count() == 0 {
+        return;
+    }
+    println!(
+        "token lengths: p50 {} / p90 {} / p99 {} / max {}, truncated {} of {} ({:.1}%), padding waste {:.1}%",
+        tokens.percentile(0.50),
+        tokens.percentile(0.90),
+        tokens.percentile(0.99),
+        tokens.max(),
+        tokens.truncated,
+        tokens.count(),
+        100.0 * tokens.truncated as f64 / tokens.count() as f64,
+        100.0 * tokens.padding_waste(),
+    );
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
@@ -237,21 +326,13 @@ fn main() -> Result<()> {
                 &db,
                 embedder.as_mut(),
                 &config,
-                |progress| {
-                    eprintln!(
-                        "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
-                        progress.embedded + progress.unresolved,
-                        progress.pending_total,
-                        progress.batches,
-                        progress.current_batch,
-                        progress.unresolved
-                    );
-                },
+                print_embed_progress,
             )?;
             println!(
                 "embedded {} new bodies in {} batches ({} unresolved)",
                 stats.embedded, stats.batches, stats.unresolved
             );
+            print_token_stats(&stats.tokens);
             Ok(())
         }
         Command::Models(args) => match args.command {
@@ -297,24 +378,7 @@ fn main() -> Result<()> {
                 Ok(())
             }
         },
-        Command::Doctor => {
-            let config = Config::load(&cli.config)?;
-            println!("config: ok ({})", cli.config.display());
-            for project in config.resolved_projects() {
-                println!(
-                    "project {}: {}",
-                    project.label,
-                    project.source_dir.display()
-                );
-            }
-            println!(
-                "embedding: backend={} model={} dims={}",
-                config.embedding.backend,
-                config.embedding.model,
-                config.embedding.dimensions()
-            );
-            Ok(())
-        }
+        Command::Doctor(args) => run_doctor(&cli.config, args),
         Command::Analyze(args) => {
             let config = Config::load(&cli.config)?;
             let db = decombine::db::open_or_create(&config.db_file)?;
@@ -349,21 +413,13 @@ fn main() -> Result<()> {
                 &db,
                 embedder.as_mut(),
                 &config,
-                |progress| {
-                    eprintln!(
-                        "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
-                        progress.embedded + progress.unresolved,
-                        progress.pending_total,
-                        progress.batches,
-                        progress.current_batch,
-                        progress.unresolved
-                    );
-                },
+                print_embed_progress,
             )?;
             println!(
                 "embedded {} new bodies in {} batches ({} unresolved)",
                 embed_stats.embedded, embed_stats.batches, embed_stats.unresolved
             );
+            print_token_stats(&embed_stats.tokens);
             drop(embedder);
             match args.analysis {
                 None | Some(AnalysisCommand::Duplicates) => {

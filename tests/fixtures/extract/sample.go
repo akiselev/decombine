@@ -34,4 +34,22 @@ func Walk(items []string, visit func(string) error) error {
 	return nil
 }
 
+func MakeGreeter(prefix string) func(string) string {
+	return func(name string) string {
+		trimmed := strings.TrimSpace(name)
+		if trimmed == "" {
+			return prefix
+		}
+		return prefix + " " + trimmed
+	}
+}
+
+func RunServer(addr string) {
+	go func() {
+		listener := listen(addr)
+		defer listener.Close()
+		serve(listener)
+	}()
+}
+
 func tiny() int { return 1 }

@@ -99,3 +99,39 @@ while letting the distance boost rescue far-apart pairs in the 0.88–0.92
 band. Comparison defaults (candidate 0.78 / match 0.86) produced useful
 strong-match precision on the real-repo run; the large possible-match band
 is expected for two codebases sharing a domain vocabulary.
+
+## 2026-07-08 addendum: token-area batch packing
+
+The tables above predate the token-area batch packer and overstate embed
+cost and memory. Since `embedding.max_batch_token_area` (default 32M,
+packing `items × longest_item_tokens²` with length-sorted pages):
+
+- Embed throughput improved 2–4x from reduced padding waste: on the OSS
+  eval ladder (`runs/oss-eval/`), BGE/redis 677→474 s, CodeRank/redis
+  7413→1741 s (4 226 bodies), CodeRank/flask 497→185 s.
+- BGE embed peak RSS dropped from ~15.5–16.8 GB to ~7.5–7.7 GB (exception:
+  redis stayed ~16.8 GB — open investigation, see TODO.md). CodeRank
+  (max_length 2048) peaks 8.8–25.8 GB, bounded but above target; the
+  budget lacks a linear activation term.
+- Per-body embed rates: BGE ~6 bodies/s → ~13–14 bodies/s on small/medium
+  corpora; CodeRank 0.6–2.0 → 2.4–5.4 bodies/s.
+
+Current end-to-end numbers live in `runs/oss-eval/timings.tsv` and the
+2026-07-08 entries in `EXPERIMENTS.md`.
+
+### Exact tokenizer counts in the packer (same day, follow-up)
+
+The packer initially estimated tokens as chars/4, which real tokenizers
+undershoot by 1.3–2.3x in padded area on the OSS corpora (Go worst). The
+packer now asks the model's own tokenizer (`Embedder::count_tokens`), which
+made the budget honest:
+
+- CodeRank/gin: 25.8 GB → 6.1 GB peak at 32M, 387 → 305 s.
+- BGE/redis: 16.8 GB → 10.7 GB peak at 32M, 474 → 443 s.
+- The default budget is now **16M**, which measured *faster and smaller*
+  than 32M on both extremes (BGE/redis 424 s / 4.5 GB; CodeRank/gin
+  280 s / 5.4 GB) — peak RSS tracks the budget cleanly, closing the redis
+  RSS anomaly (its long-body profile simply saturates the budget: 13% of
+  bodies at the 512-token clamp).
+- `embed` now prints token-length percentiles, truncation rate, and padding
+  waste after each run.

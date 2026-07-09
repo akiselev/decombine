@@ -192,6 +192,71 @@ fn rerank_rescues_far_apart_near_miss() {
 }
 
 #[test]
+fn same_name_family_flagged_and_ordered_after_other_clusters() {
+    // Six `update` impls across six scopes: a trait-impl idiom family.
+    let mut units = Vec::new();
+    let mut vectors = Vec::new();
+    for i in 0..6 {
+        units.push(unit(
+            "main",
+            &format!("flags/f{i}.rs"),
+            "update",
+            Some(&format!("Flag{i}")),
+            &format!("hash-update-{i}"),
+            10,
+        ));
+        vectors.push(Some(normalize(vec![1.0, 0.01 * i as f32, 0.0, 0.0])));
+    }
+    // A weaker cross-name pair (same directory, so no distance boost) that
+    // must still outrank the family.
+    units.push(unit("main", "core/read.rs", "load", None, "hash-load", 10));
+    units.push(unit(
+        "main",
+        "core/fetch.rs",
+        "fetch",
+        None,
+        "hash-fetch",
+        40,
+    ));
+    vectors.push(Some(normalize(vec![0.0, 0.0, 1.0, 0.38])));
+    vectors.push(Some(normalize(vec![0.0, 0.0, 1.0, 0.0])));
+
+    let report = run_duplicates(&ctx(units, vectors, &["main"]));
+    assert_eq!(report.clusters.len(), 2);
+    let first = &report.clusters[0];
+    let second = &report.clusters[1];
+    assert_eq!(first.name_family, None);
+    assert_eq!(first.members, vec![6, 7]);
+    assert_eq!(second.name_family.as_deref(), Some("update"));
+    assert!(
+        second.top_boosted > first.top_boosted,
+        "the family must be ordered last despite the higher score"
+    );
+}
+
+#[test]
+fn same_name_family_needs_scope_diversity() {
+    // Six exact same-name units without scopes (e.g. C): not flagged.
+    let v = normalize(vec![1.0, 0.05, 0.0, 0.0]);
+    let units: Vec<CodeUnitRef> = (0..6)
+        .map(|i| {
+            unit(
+                "main",
+                &format!("src/api{i}.c"),
+                "handle",
+                None,
+                &format!("hash-{i}"),
+                10,
+            )
+        })
+        .collect();
+    let vectors = vec![Some(v); 6];
+    let report = run_duplicates(&ctx(units, vectors, &["main"]));
+    assert_eq!(report.clusters.len(), 1);
+    assert_eq!(report.clusters[0].name_family, None);
+}
+
+#[test]
 fn ignore_file_hashes_suppress_clusters() {
     let v = normalize(vec![1.0, 0.05, 0.0, 0.0]);
     let units = vec![

@@ -8,7 +8,7 @@
 
 3 candidate pairs, 1 clusters (0 ignored).
 
-## Clusters
+## Product code clusters
 
 | # | Cluster | Units | Top raw | Boosted | Members |
 | --- | --- | --- | --- | --- | --- |

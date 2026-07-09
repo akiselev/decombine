@@ -233,6 +233,13 @@ pub struct EmbeddingConfig {
     pub normalize: bool,
     #[serde(default = "default_execution_provider")]
     pub execution_provider: String,
+    /// What to do when a non-`cpu` `execution_provider` cannot be used
+    /// (not compiled into this binary, or ONNX Runtime reports it
+    /// unavailable). `require` fails loudly; `auto` warns and falls back to
+    /// CPU. CPU fallback is never silent — the model identity records the
+    /// provider actually used, so GPU and CPU embeddings never share a row.
+    #[serde(default = "default_provider_mode")]
+    pub provider_mode: ProviderMode,
     #[serde(default)]
     pub quantized: bool,
     /// When set, `model` is a free-form label and the embedding model is
@@ -301,6 +308,25 @@ impl RetentionMode {
             RetentionMode::Full => "full",
             RetentionMode::Report => "report",
             RetentionMode::Minimal => "minimal",
+        }
+    }
+}
+
+/// Policy for a requested non-`cpu` execution provider that cannot initialize.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderMode {
+    /// Fail with a clear error if the provider cannot be used.
+    Require,
+    /// Warn once and fall back to CPU.
+    Auto,
+}
+
+impl ProviderMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProviderMode::Require => "require",
+            ProviderMode::Auto => "auto",
         }
     }
 }
@@ -450,7 +476,11 @@ fn default_max_batch_chars() -> usize {
     200_000
 }
 fn default_max_batch_token_area() -> usize {
-    32_000_000
+    // Measured 2026-07-08 (with exact tokenizer counts): 16M is faster AND
+    // smaller than 32M on both budget-saturating extremes — redis/BGE
+    // 424 s / 4.5 GB vs 443 s / 10.7 GB, gin/CodeRank 280 s / 5.4 GB vs
+    // 305 s / 6.1 GB. CPU inference gains nothing from bigger batches.
+    16_000_000
 }
 fn default_max_body_chars() -> usize {
     10_000
@@ -460,6 +490,9 @@ fn default_pending_page_size() -> usize {
 }
 fn default_execution_provider() -> String {
     "cpu".to_string()
+}
+fn default_provider_mode() -> ProviderMode {
+    ProviderMode::Require
 }
 fn default_true() -> bool {
     true
@@ -548,8 +581,24 @@ impl Config {
             })?;
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         config.resolve_paths(base);
+        config.apply_env_overrides();
         config.validate()?;
         Ok(config)
+    }
+
+    /// Environment overrides for the execution provider, applied after the
+    /// file is parsed and before validation (so a bad value still errors).
+    /// `DECOMBINE_DISABLE_ACCEL=1` wins over `DECOMBINE_EXECUTION_PROVIDER`,
+    /// forcing CPU regardless of file or the other variable.
+    fn apply_env_overrides(&mut self) {
+        if let Some(provider) =
+            std::env::var_os("DECOMBINE_EXECUTION_PROVIDER").and_then(|v| v.into_string().ok())
+        {
+            self.embedding.execution_provider = provider;
+        }
+        if std::env::var_os("DECOMBINE_DISABLE_ACCEL").is_some_and(|v| v == "1" || v == "true") {
+            self.embedding.execution_provider = "cpu".to_string();
+        }
     }
 
     /// Make all configured paths absolute relative to `base`.
@@ -866,11 +915,15 @@ embedding:
   batch_size: 256
   max_batch_chars: 200000
   # Padded token area cap (items x longest_tokens^2); bounds embed peak RSS.
-  max_batch_token_area: 32000000
+  max_batch_token_area: 16000000
   max_body_chars: 10000
   pending_page_size: 512
   normalize: true
+  # cpu (default) or an accelerator: cuda | directml | coreml | openvino.
+  # Accelerators require a binary built with that feature; see docs/packaging.md.
   execution_provider: cpu
+  # require: fail if the accelerator can't be used; auto: warn and use cpu.
+  provider_mode: require
   quantized: false
 
 index:
