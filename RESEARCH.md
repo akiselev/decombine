@@ -12,6 +12,7 @@ rollout guardrails.
 - [Name/Code Embedding Consistency](docs/research/name-code-embedding-consistency.md) - research on separate name/code embedding channels, misleading-name candidates, naming inconsistency reports, and local rename-suggestion experiments.
 - [Agent Query Interface](docs/research/agent-query-interface.md) - research on a machine-readable query CLI for coding agents, including JSON/JSONL schemas, stable selectors, explainable results, query packs, and phased command design.
 - [Case-study Corpus Selection](docs/research/case-study-corpus-selection.md) - per-language repository matrix for public case studies, plus scale alternates and AI-assisted rapid-build stress targets such as OpenClaw.
+- [Quantized Model Distribution](docs/research/quantized-model-distribution.md) - measured quantization results (int8 rejected, fp16 shippable) and the upload+pin workflow for distributing compressed models via the managed-model mechanism.
 
 ## Policy
 

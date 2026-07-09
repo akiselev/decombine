@@ -35,34 +35,29 @@ deferred until real agent usage demands them:
   `embed` now prints token percentiles/truncation/padding-waste.
   `runs/oss-eval/timings.tsv` embed rows are stale until the next sweep.
 
-## CodeRankEmbed Quantization
+## CodeRankEmbed Quantization — DONE 2026-07-09 (int8 rejected, fp16 shippable)
 
-- Build a CodeRank calibration/holdout corpus under `runs/model-calibration/`.
-  - Source embedding texts from Altium, Cadabra, and OSS eval databases.
-  - Stratify by language, body length, boilerplate-heavy code, short utilities, long functions near `max_length: 2048`, and test code.
-  - Keep calibration and holdout files separate.
-- Use `scripts/coderank_onnx.py` for CodeRank calibration, static int8
-  quantization, verification, and manifest emission. The current fp32 artifact
-  is the community `Zenabius/CodeRankEmbed-onnx` export; our own optimum export
-  was blocked by nomic-bert rotary-cache tracing.
-  - Use ONNX Runtime calibration APIs.
-  - Emit target-specific artifact directories such as `coderankembed-int8-static-avx512_vnni`.
-  - Record artifact SHA256 hashes and quantization settings in `decombine-model-manifest.json`.
-- Add a higher-level verification command that can optionally compare against the Torch `nomic-ai/CodeRankEmbed` reference, not only fp32 ONNX.
-  - Gate fp32 ONNX vs Torch at pooled cosine `>= 0.99999`.
-  - Gate int8 vs fp32 at mean pooled cosine `>= 0.999`, minimum pooled cosine `>= 0.995`, p95 pairwise delta `<= 0.005`, max pairwise delta `<= 0.02`, and top-10 recall `>= 0.98`.
-- Clean up production custom-model config after the artifact flow is proven.
-  - Decide whether runtime config should reference a manifest/artifact name or
-    keep pointing directly at `embedding.custom.onnx_file`.
-  - Audit which model identity fields are now actually used for production
-    custom models (`revision`, `model_hash`, `tokenizer_hash`, `quantization`,
-    `cache_path`) and remove or document any experiment-only ambiguity.
-  - Keep `embedding.quantized: true` rejected for custom ONNX until there is a
-    clear non-ambiguous meaning for it.
-- Run and record real quantized CodeRank experiments.
-  - Altium CodeRank fp32 vs int8.
-  - Cadabra CodeRank fp32 vs int8.
-  - Promote int8 only if throughput improves by at least `1.5x` or RSS falls substantially without quality regression.
+Ran the full pipeline (see EXPERIMENTS.md 2026-07-09 + `docs/research/
+quantized-model-distribution.md`). Verdict: **int8 is not viable** for
+CodeRankEmbed at the quality gate (static minmax cos 0.569/recall 0.493;
+dynamic per-tensor 0.925/0.804; dynamic per-channel 0.039/0.044 — all fail
+mean≥0.999 / recall≥0.98). **fp16 is near-lossless** (cos 0.999998, recall
+0.9983) at half the size (548→275 MB), so it is the shippable compressed
+variant. fp16 CPU throughput is neutral (1.01×; ORT upcasts) — the win is
+download size + GPU compute.
+
+- fp16 ONNX produced at `~/.cache/decombine/custom/coderankembed-fp16` (hashes
+  recorded in the distribution doc), verified, **pending HF upload + a
+  `MANAGED_MODELS` entry** — the only remaining steps to distribute it (needs an
+  HF repo + credentials; reuses the existing managed-model download/verify).
+- Balanced calibration/holdout were built directly from a full-retention OSS
+  index because the script's stratified split greedily fills alphabetically
+  (concentrates on C). Worth fixing `split_corpus` to sample proportionally.
+- `scripts/coderank_onnx.py` static path OOMs at max_length 2048 / percentile;
+  `minmax` at 256 works. Consider adding a `quantize-dynamic` + `to-fp16`
+  subcommand so the winning recipe is codified (currently done inline).
+- Not pursued (int8 dead): per-target int8 artifact dirs, quantization manifest
+  polish, `embedding.quantized` semantics for custom ONNX.
 
 ## Token-Aware Embedding Batching (mostly shipped 2026-07-08)
 

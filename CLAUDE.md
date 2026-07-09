@@ -7,7 +7,8 @@ upstream Slopo (`_upstream/`, research-only, never copy code from it).
 
 Deeper docs: `architecture.md` (design), `PLAN.md` (phases), `EXPERIMENTS.md`
 (every experiment, append-only log), `TODO.md` (next work),
-`docs/benchmarks.md` (calibration baselines).
+`docs/benchmarks.md` (calibration baselines), `docs/query-interface.md`
+(`query` command family + analyzer `--json` reference, with examples).
 
 ## Build, test, verify
 

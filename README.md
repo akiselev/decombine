@@ -20,11 +20,23 @@ decombine analyze [duplicates] # duplicate cluster analysis (default)
 decombine analyze concerns     # concern query projection analysis
 decombine compare              # compare two indexed projects
 decombine run                  # index + embed + analyze
+decombine query capabilities   # what this config/database can answer
+decombine query units          # list units, filtered by metadata (--where)
+decombine query inspect        # resolve a unit:<id> selector (+ --source)
+decombine query similar        # vector neighbors of a unit
+decombine query search         # semantic search from natural language
+decombine query qbe            # query by example (same engine as similar)
 decombine languages list
 decombine models list
 decombine models download
 decombine doctor
 ```
+
+`analyze`, `compare`, and every `query` command take `--json` for a
+machine-readable envelope on stdout (progress stays on stderr) and
+`--limit` with honest `exhaustive`/`has_more` reporting — see
+[docs/query-interface.md](docs/query-interface.md) for the full reference,
+with examples run against this repository.
 
 ## Quick start
 
