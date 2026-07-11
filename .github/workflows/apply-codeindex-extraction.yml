@@ -1,0 +1,79 @@
+name: Apply codeindex extraction
+
+on:
+  push:
+    branches:
+      - agent/extract-code-index-core
+
+permissions:
+  contents: write
+
+jobs:
+  apply-and-validate:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out extraction branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/extract-code-index-core
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Generate full extraction
+        run: python3 tools/extract_codeindex.py
+
+      - name: Format generated Rust
+        run: cargo fmt --all
+
+      - name: Validate and record results
+        shell: bash
+        run: |
+          set +e
+          log=tools/extraction-validation.log
+          : > "$log"
+          overall=0
+
+          echo "rustc: $(rustc --version)" | tee -a "$log"
+          echo "cargo: $(cargo --version)" | tee -a "$log"
+
+          run_check() {
+            echo | tee -a "$log"
+            printf '$' | tee -a "$log"
+            printf ' %q' "$@" | tee -a "$log"
+            echo | tee -a "$log"
+            "$@" 2>&1 | tee -a "$log"
+            rc=${PIPESTATUS[0]}
+            echo "exit=$rc" | tee -a "$log"
+            if [ "$rc" -ne 0 ]; then
+              overall=1
+            fi
+          }
+
+          run_check cargo generate-lockfile
+          run_check cargo fmt --all -- --check
+          run_check cargo check --workspace --all-targets --no-default-features
+          run_check cargo test --workspace --no-default-features
+          run_check cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+          run_check cargo check --workspace --all-targets
+
+          echo | tee -a "$log"
+          echo "overall_status=$overall" | tee -a "$log"
+          exit 0
+
+      - name: Commit generated extraction and validation log
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m 'complete reusable code index extraction'
+            git push origin HEAD:agent/extract-code-index-core
+          fi
