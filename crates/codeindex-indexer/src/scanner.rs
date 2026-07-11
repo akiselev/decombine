@@ -16,7 +16,8 @@ pub struct ScannedFile {
 }
 
 /// Walk a project root and return files whose language is enabled.
-/// Respects `.gitignore` files plus the project's exclude patterns.
+/// Respects `.gitignore` files plus the project's exclude patterns, including
+/// unpacked source trees that are not themselves Git repositories.
 pub fn scan_files(
     root: &Path,
     exclude: &[String],
@@ -33,7 +34,9 @@ pub fn scan_files(
 
     let registry = LanguageRegistry::global();
     let mut files = Vec::new();
-    for entry in WalkBuilder::new(root).overrides(overrides).build() {
+    let mut walk = WalkBuilder::new(root);
+    walk.overrides(overrides).require_git(false);
+    for entry in walk.build() {
         let entry = entry?;
         if !entry.file_type().is_some_and(|t| t.is_file()) {
             continue;
