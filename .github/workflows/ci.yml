@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  test-minimal:
+    name: test (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace without default features
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --quiet --workspace --all-targets --no-default-features 2>&1 | tee check-no-default.log
+
+      - name: Upload check diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-no-default-diagnostics
+          path: check-no-default.log
+          retention-days: 1
+
+      - name: Run workspace tests without default features
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --quiet --workspace --no-default-features 2>&1 | tee test-no-default.log
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-no-default-diagnostics
+          path: test-no-default.log
+          retention-days: 1
+
+  clippy:
+    name: clippy (no default features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run clippy
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --quiet --workspace --all-targets --no-default-features -- -D warnings 2>&1 | tee clippy-no-default.log
+
+      - name: Upload clippy diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-no-default-diagnostics
+          path: clippy-no-default.log
+          retention-days: 1
+
+  check-default:
+    name: check (default features)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace with default features
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --quiet --workspace --all-targets 2>&1 | tee check-default.log
+
+      - name: Upload default-feature diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-default-diagnostics
+          path: check-default.log
+          retention-days: 1

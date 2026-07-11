@@ -1,9 +1,0 @@
-id = "python"
-name = "Python"
-extensions = ["py"]
-comment_nodes = ["comment"]
-adapter = "python"
-
-[[scopes]]
-kind = "class_definition"
-field = "name"

@@ -1,23 +1,28 @@
+# The reusable code-intelligence crates now live in their own repository at
+# ../codeindex (github: codeindex). decombine consumes them as path
+# dependencies below; swap the paths for a git dependency to pin a revision.
+[workspace]
+members = ["."]
+resolver = "3"
+
 [package]
 name = "decombine"
 version = "0.1.0"
 edition = "2024"
 description = "Embedding-based detector for non-exact code duplication, concern signals, and project comparison"
-# License is an open decision (see PLAN.md). Upstream research material is AGPL;
-# no upstream implementation code is copied into this repository.
 publish = false
 
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
-fastembed = { version = "5.17.2", optional = true }
+codeindex-core = { path = "../codeindex/crates/core" }
+codeindex-embedding = { path = "../codeindex/crates/embedding", default-features = false }
+codeindex-indexer = { path = "../codeindex/crates/indexer" }
+codeindex-query = { path = "../codeindex/crates/query" }
+codeindex-sqlite = { path = "../codeindex/crates/sqlite" }
+codeindex-tree-sitter = { path = "../codeindex/crates/tree-sitter" }
 globset = "0.4.18"
-# Direct handle on the same ONNX Runtime `fastembed` pins, so accelerator
-# execution-provider features (`ort/cuda`, …) resolve onto the one shared
-# `ort` instance. Off by default: the CPU build never compiles it.
-ort = { version = "=2.0.0-rc.12", optional = true, default-features = false }
 hex = "0.4.3"
-ignore = "0.4.27"
 ndarray = "0.17.2"
 rayon = "1.12.0"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
@@ -25,41 +30,17 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 serde_yaml = "0.9.34"
 sha2 = "0.11.0"
-streaming-iterator = "0.1.9"
 thiserror = "2.0.18"
-toml = "1.1.2"
-# Blocking HTTP for managed-model downloads (CodeRankEmbed ONNX). Only compiled
-# with the `fastembed` backend, which is the only consumer.
-ureq = { version = "3.3.0", optional = true }
-tree-sitter = "0.26.10"
-tree-sitter-c = "0.24.2"
-tree-sitter-c-sharp = "0.23.5"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-go = "0.25.0"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-kotlin-ng = "1.1.0"
-tree-sitter-php = "0.24.2"
-tree-sitter-python = "0.25.0"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-rust = "0.24.2"
-tree-sitter-typescript = "0.23.2"
 
 [features]
 default = ["fastembed"]
-fastembed = ["dep:fastembed", "dep:ureq"]
-# `accel` pulls the shared `ort` crate into scope so the execution-provider
-# plumbing compiles; the per-provider features layer the matching ONNX Runtime
-# EP on top. Each accelerator is its own artifact lane (see
-# docs/research/release-architecture.md) — none are in `default`.
-accel = ["fastembed", "dep:ort"]
-cuda = ["accel", "ort/cuda"]
-directml = ["accel", "ort/directml", "fastembed/directml"]
-coreml = ["accel", "ort/coreml"]
-openvino = ["accel", "ort/openvino"]
-# Load ONNX Runtime from a dylib at runtime (ORT_DYLIB_PATH) instead of
-# linking it in: one binary, any EP the pointed-at ORT build supports.
-load-dynamic = ["accel", "ort/load-dynamic", "fastembed/ort-load-dynamic"]
+fastembed = ["codeindex-embedding/fastembed"]
+accel = ["fastembed", "codeindex-embedding/accel"]
+cuda = ["accel", "codeindex-embedding/cuda"]
+directml = ["accel", "codeindex-embedding/directml"]
+coreml = ["accel", "codeindex-embedding/coreml"]
+openvino = ["accel", "codeindex-embedding/openvino"]
+load-dynamic = ["accel", "codeindex-embedding/load-dynamic"]
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
