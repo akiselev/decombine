@@ -645,3 +645,22 @@ Reran the full 10-run sweep on fresh DBs with the four method changes. Zero fail
   `docs/research/quantized-model-distribution.md`. fp16 ONNX produced at
   `~/.cache/decombine/custom/coderankembed-fp16` (hashes recorded), pending an
   HF upload + `MANAGED_MODELS` entry.
+
+## Codeindex crate extraction — scanner behavior change (2026-07-11)
+
+- Behavior change to watch: the extracted scanner
+  (`codeindex-indexer/src/scanner.rs`) now sets `WalkBuilder::require_git(false)`,
+  so `.gitignore`/`.ignore` rules are honored even when the scanned root is
+  **not** a Git repository. Before extraction, decombine honored `.gitignore`
+  only inside a real repo. No effect on the standing testbeds — the OSS-eval
+  corpora (`runs/oss-eval/corpora/`) and altium rebuilds are shallow Git clones,
+  so their walks are unchanged, and extraction/report golden fixtures are
+  byte-identical after the move (all golden tests pass). The exposure is any
+  future run over a non-Git source tree that ships a `.gitignore` (e.g. an
+  unpacked release tarball): such a run now indexes fewer files than before.
+  Since indexed-unit counts feed comparison background calibration, re-baseline
+  before trusting cross-run numbers on any non-Git corpus.
+- The extraction is otherwise behavior-preserving: extraction + report golden
+  snapshots unchanged, `unit:`/`cluster:`/`match:` IDs stable (single
+  `unit_id`/`unit_line` in `codeindex-query`). See `docs/codeindex-architecture.md`
+  and TODO.md "Codeindex crate extraction — review follow-ups".

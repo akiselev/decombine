@@ -54,12 +54,15 @@ Deeper docs: `architecture.md` (design), `PLAN.md` (phases), `EXPERIMENTS.md`
 
 ## Code map and gotchas
 
-- `src/index/`: scanner → tree-sitter extraction. Languages are declarative:
-  `assets/languages/<id>.toml` + `<id>/units.scm`; irregular cases (anonymous
-  naming, receiver scopes, docstrings) live in adapters in
-  `src/index/language.rs`.
-- `src/embed/`: `Embedder` trait + fastembed backend + token-area batch
-  packer (`pack_batches` in `embed/mod.rs`).
+- The indexing substrate (scan, tree-sitter extraction + language catalog,
+  SQLite persistence, embedding backends + batch packer, query ranking) now
+  lives in the standalone **codeindex** workspace at `../codeindex`, consumed
+  as path deps (`codeindex-core`, `-tree-sitter`, `-sqlite`, `-indexer`,
+  `-embedding`, `-query`). decombine's `src/{db,index,embed,query}` are thin
+  compatibility adapters over those crates. Language catalog and adapters:
+  `../codeindex/crates/tree-sitter` (`assets/languages/<id>.toml` +
+  `<id>/units.scm`, adapters in `src/language.rs`). Embedding backend + packer:
+  `../codeindex/crates/embedding`.
 - `src/analyze/`: `duplicate/` (candidate pairs → rerank → distinct-body-
   bounded union-find → `ClusterKind` sectioning), `compare/`, `concerns/`.
 - `src/report/markdown.rs`: all report rendering; duplicate index is

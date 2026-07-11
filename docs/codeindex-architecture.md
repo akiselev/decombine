@@ -3,16 +3,23 @@
 The reusable code-intelligence substrate is split by dependency and change
 boundary rather than by command:
 
-- `codeindex-core`: parser- and storage-neutral entities, spans, and textual
-  representation channels.
+- `codeindex-core`: parser- and storage-neutral entities, spans, textual
+  representation channels, and the embedding `ModelIdentity` shared between the
+  backends that produce it and the store that persists it.
 - `codeindex-tree-sitter`: bundled grammars, language adapters,
   normalization, and parser-neutral extraction.
 - `codeindex-sqlite`: the current incremental SQLite schema, migrations,
-  model identities, vectors, and persistence API.
+  model identities, vectors, the persistence API, and the single
+  `ExtractedEntity → NewCodeUnit` channel→column projection (`From`).
 - `codeindex-indexer`: filesystem scanning, change detection, extraction,
-  retention, and transactional updates into `codeindex-sqlite`.
-- `codeindex-embedding`: local model execution, provider diagnostics,
-  batching, source-text recovery, and resumable embedding projection.
+  retention, transactional updates into `codeindex-sqlite`, and the workflow
+  that embeds a *stored corpus* — resumable projection, source-text recovery
+  under lean retention, and offline token reports.
+- `codeindex-embedding`: local model execution, provider diagnostics, batch
+  packing, normalization, and token instrumentation. Deliberately free of
+  storage and parser dependencies (only `codeindex-core`) so it can back a
+  lightweight notebook binding without compiling SQLite or the grammars; the
+  corpus-embedding workflow that needs both lives in `codeindex-indexer`.
 - `codeindex-query`: stable selectors, metadata filtering, identity
   diagnostics, and deterministic vector ranking.
 - `codeindex`: a thin facade for applications that prefer one dependency.

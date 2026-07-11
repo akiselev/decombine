@@ -1,5 +1,44 @@
 # TODO
 
+## Codeindex crate extraction — review follow-ups (2026-07-11)
+
+Code review of the `agent/extract-code-index-core` branch (indexing stack split
+into reusable `codeindex-*` crates). Fixed in-branch:
+
+- ~~`codeindex-embedding` dragged in SQLite + all 12 grammars~~ DONE: the
+  parser/storage-free primitives (the `Embedder` trait, backends, batch packer,
+  normalization, `TokenStats`) now depend only on `codeindex-core`, so a
+  notebook/PyO3 binding compiles neither bundled SQLite nor the grammars. The
+  corpus-embedding workflow (`embed_pending`, `token_report`, source recovery)
+  moved to `codeindex-indexer::embed`. `ModelIdentity` moved to `codeindex-core`.
+- ~~`ExtractedEntity → NewCodeUnit` duplicated 3×~~ DONE: single
+  `impl From<ExtractedEntity> for NewCodeUnit` in `codeindex-sqlite::models`;
+  the indexer, the embedding source-recovery path, and the decombine adapter all
+  use it.
+- ~~`existing_model_id` misnamed~~ DONE: it calls `find_or_create_model`, so it
+  is now `find_or_create_model_id` (`codeindex-indexer`).
+
+Recorded, not yet actioned:
+
+- Scanner now honors `.gitignore` outside Git repos (`require_git(false)`).
+  Intentional; re-baseline before trusting cross-run numbers on any non-Git
+  corpus. Details in EXPERIMENTS.md 2026-07-11.
+- `codeindex-core` ships a forward-looking model — `EntityId`, `EntityVersionId`,
+  and 8 of 10 `RepresentationKind` variants — that no consumer uses yet (the
+  pipeline only wires `FullSource` + `Implementation`, and the compatible schema
+  stores only `display_source`/`embedding_text`). Deliberate seeding for the
+  future entity-version / multi-representation schema migration, kept as dead
+  vocabulary until that lands; drop or wire it when the schema moves.
+- `codeindex-embedding/build.rs` still emits `DECOMBINE_FASTEMBED_VERSION` /
+  `DECOMBINE_ORT_VERSION` — the original app name leaking from an
+  application-neutral crate. Rename to a `CODEINDEX_*` prefix (update the
+  backend's `env!` reads in lockstep) when convenient.
+- CI runs tests + clippy only under `--no-default-features`; the default-feature
+  job is `check`-only, so `fastembed_backend.rs` is compiled but never clippy'd
+  or unit-tested in CI. Add a gated default-feature test/clippy job (or accept
+  that the fastembed backend is covered only by local runs) — see `.github/
+  workflows/ci.yml`.
+
 ## Agent Query Interface (core shipped 2026-07-09)
 
 Steps 1–3 of `docs/research/agent-query-interface.md` landed: analyzer

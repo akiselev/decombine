@@ -1,14 +1,8 @@
+# The reusable code-intelligence crates now live in their own repository at
+# ../codeindex (github: codeindex). decombine consumes them as path
+# dependencies below; swap the paths for a git dependency to pin a revision.
 [workspace]
-members = [
-    ".",
-    "crates/codeindex",
-    "crates/codeindex-core",
-    "crates/codeindex-embedding",
-    "crates/codeindex-indexer",
-    "crates/codeindex-query",
-    "crates/codeindex-sqlite",
-    "crates/codeindex-tree-sitter",
-]
+members = ["."]
 resolver = "3"
 
 [package]
@@ -21,12 +15,12 @@ publish = false
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
-codeindex-core = { path = "crates/codeindex-core" }
-codeindex-embedding = { path = "crates/codeindex-embedding", default-features = false }
-codeindex-indexer = { path = "crates/codeindex-indexer" }
-codeindex-query = { path = "crates/codeindex-query" }
-codeindex-sqlite = { path = "crates/codeindex-sqlite" }
-codeindex-tree-sitter = { path = "crates/codeindex-tree-sitter" }
+codeindex-core = { path = "../codeindex/crates/core" }
+codeindex-embedding = { path = "../codeindex/crates/embedding", default-features = false }
+codeindex-indexer = { path = "../codeindex/crates/indexer" }
+codeindex-query = { path = "../codeindex/crates/query" }
+codeindex-sqlite = { path = "../codeindex/crates/sqlite" }
+codeindex-tree-sitter = { path = "../codeindex/crates/tree-sitter" }
 globset = "0.4.18"
 hex = "0.4.3"
 ndarray = "0.17.2"

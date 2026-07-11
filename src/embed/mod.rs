@@ -10,9 +10,10 @@ use crate::db::Db;
 pub use codeindex_embedding::embed::fastembed_backend;
 pub use codeindex_embedding::embed::hash;
 pub use codeindex_embedding::{
-    ACCELERATOR_PROVIDERS, EmbedProgress, EmbedStats, Embedder, LanguageTokens, ProviderDiag,
-    TokenStats, accelerator_diagnostics, existing_model_id, normalize_in_place,
+    ACCELERATOR_PROVIDERS, Embedder, ProviderDiag, TokenStats, accelerator_diagnostics,
+    normalize_in_place,
 };
+pub use codeindex_indexer::{EmbedProgress, EmbedStats, LanguageTokens, find_or_create_model_id};
 
 fn custom(config: &AppCustomModelConfig) -> codeindex_embedding::config::CustomModelConfig {
     codeindex_embedding::config::CustomModelConfig {
@@ -59,7 +60,7 @@ pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
 }
 
 pub fn embed_pending(db: &Db, embedder: &mut dyn Embedder, config: &Config) -> Result<EmbedStats> {
-    codeindex_embedding::embed_pending(db, embedder, &run_config(config))
+    codeindex_indexer::embed_pending(db, embedder, &run_config(config))
 }
 
 pub fn embed_pending_with_progress(
@@ -68,7 +69,7 @@ pub fn embed_pending_with_progress(
     config: &Config,
     progress: impl FnMut(EmbedProgress),
 ) -> Result<EmbedStats> {
-    codeindex_embedding::embed_pending_with_progress(db, embedder, &run_config(config), progress)
+    codeindex_indexer::embed_pending_with_progress(db, embedder, &run_config(config), progress)
 }
 
 pub fn token_report(
@@ -76,5 +77,5 @@ pub fn token_report(
     config: &Config,
     embedder: &dyn Embedder,
 ) -> Result<Vec<LanguageTokens>> {
-    codeindex_embedding::token_report(db, &run_config(config), embedder)
+    codeindex_indexer::token_report(db, &run_config(config), embedder)
 }
