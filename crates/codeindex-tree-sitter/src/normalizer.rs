@@ -1,5 +1,5 @@
-use std::ops::Range;
 use sha2::{Digest, Sha256};
+use std::ops::Range;
 
 pub fn strip_ranges(text: &str, ranges: &[Range<usize>]) -> String {
     let merged = merge_ranges(ranges);
@@ -8,10 +8,14 @@ pub fn strip_ranges(text: &str, ranges: &[Range<usize>]) -> String {
     for range in merged {
         let start = range.start.min(text.len());
         let end = range.end.min(text.len());
-        if start > cursor { out.push_str(&text[cursor..start]); }
+        if start > cursor {
+            out.push_str(&text[cursor..start]);
+        }
         cursor = cursor.max(end);
     }
-    if cursor < text.len() { out.push_str(&text[cursor..]); }
+    if cursor < text.len() {
+        out.push_str(&text[cursor..]);
+    }
     out
 }
 
@@ -20,7 +24,9 @@ pub fn merge_ranges(ranges: &[Range<usize>]) -> Vec<Range<usize>> {
     sorted.sort_by_key(|r| (r.start, r.end));
     let mut merged: Vec<Range<usize>> = Vec::with_capacity(sorted.len());
     for range in sorted {
-        if range.start >= range.end { continue; }
+        if range.start >= range.end {
+            continue;
+        }
         match merged.last_mut() {
             Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
             _ => merged.push(range),
@@ -48,6 +54,9 @@ mod tests {
     }
     #[test]
     fn normalizes_whitespace() {
-        assert_eq!(normalize_for_hash("  fn   foo()\n\t{ 1 }\n"), "fn foo() { 1 }");
+        assert_eq!(
+            normalize_for_hash("  fn   foo()\n\t{ 1 }\n"),
+            "fn foo() { 1 }"
+        );
     }
 }

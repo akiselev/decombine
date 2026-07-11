@@ -1,0 +1,11 @@
+[package]
+name = "codeindex-sqlite"
+version = "0.1.0"
+edition = "2024"
+description = "SQLite persistence and migrations for code indexes"
+publish = false
+
+[dependencies]
+anyhow = "1.0.103"
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+serde = { version = "1.0.228", features = ["derive"] }

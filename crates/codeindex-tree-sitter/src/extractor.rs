@@ -2,8 +2,8 @@ use std::ops::Range;
 
 use anyhow::{Context, Result};
 use codeindex_core::{
-    EntityKind, ExtractedEntity, ExtractedFile, LanguageId, Representation,
-    RepresentationKind, SourceSpan,
+    EntityKind, ExtractedEntity, ExtractedFile, LanguageId, Representation, RepresentationKind,
+    SourceSpan,
 };
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Parser, QueryCursor};
@@ -19,7 +19,10 @@ pub struct ExtractOptions {
 
 impl Default for ExtractOptions {
     fn default() -> Self {
-        Self { body_node_count_threshold: 10, max_body_chars: 10_000 }
+        Self {
+            body_node_count_threshold: 10,
+            max_body_chars: 10_000,
+        }
     }
 }
 
@@ -28,7 +31,10 @@ pub fn extract_file(
     source: &str,
     options: &ExtractOptions,
 ) -> Result<ExtractedFile> {
-    Ok(ExtractedFile { entities: extract_units(def, source, options)?, diagnostics: Vec::new() })
+    Ok(ExtractedFile {
+        entities: extract_units(def, source, options)?,
+        diagnostics: Vec::new(),
+    })
 }
 
 pub fn extract_units(
@@ -37,9 +43,11 @@ pub fn extract_units(
     options: &ExtractOptions,
 ) -> Result<Vec<ExtractedEntity>> {
     let mut parser = Parser::new();
-    parser.set_language(&def.language)
+    parser
+        .set_language(&def.language)
         .with_context(|| format!("loading grammar for {}", def.spec.id))?;
-    let tree = parser.parse(source, None)
+    let tree = parser
+        .parse(source, None)
         .with_context(|| format!("parsing {} source", def.spec.id))?;
 
     let unit_idx = capture_index(def, "unit");
@@ -55,27 +63,43 @@ pub fn extract_units(
     while let Some(query_match) = matches.next() {
         let mut unit_node = None;
         let mut pending = PendingUnit {
-            node: tree.root_node(), body: None, kind: "function".to_string(),
-            name: None, scope: None, strip: Vec::new(),
+            node: tree.root_node(),
+            body: None,
+            kind: "function".to_string(),
+            name: None,
+            scope: None,
+            strip: Vec::new(),
         };
         for capture in query_match.captures {
             let index = Some(capture.index);
-            if index == unit_idx { unit_node = Some(capture.node); }
-            else if index == name_idx { pending.name = Some(source[capture.node.byte_range()].to_string()); }
-            else if index == body_idx { pending.body = Some(capture.node); }
-            else if index == strip_idx { pending.strip.push(capture.node.byte_range()); }
-            else if index == scope_idx { pending.scope = Some(source[capture.node.byte_range()].to_string()); }
+            if index == unit_idx {
+                unit_node = Some(capture.node);
+            } else if index == name_idx {
+                pending.name = Some(source[capture.node.byte_range()].to_string());
+            } else if index == body_idx {
+                pending.body = Some(capture.node);
+            } else if index == strip_idx {
+                pending.strip.push(capture.node.byte_range());
+            } else if index == scope_idx {
+                pending.scope = Some(source[capture.node.byte_range()].to_string());
+            }
         }
         let Some(node) = unit_node else { continue };
         pending.node = node;
         for property in def.query.property_settings(query_match.pattern_index) {
-            if &*property.key == "unit.kind" && let Some(value) = &property.value {
+            if &*property.key == "unit.kind"
+                && let Some(value) = &property.value
+            {
                 pending.kind = value.to_string();
             }
         }
-        if let Some(adapter) = def.adapter { adapter.refine(source, &mut pending); }
+        if let Some(adapter) = def.adapter {
+            adapter.refine(source, &mut pending);
+        }
         let range = pending.node.byte_range();
-        if seen_ranges.contains(&range) { continue; }
+        if seen_ranges.contains(&range) {
+            continue;
+        }
         if let Some(unit) = build_unit(def, source, pending, options) {
             seen_ranges.push(range);
             units.push(unit);
@@ -86,7 +110,11 @@ pub fn extract_units(
 }
 
 fn capture_index(def: &LanguageDef, name: &str) -> Option<u32> {
-    def.query.capture_names().iter().position(|n| *n == name).map(|i| i as u32)
+    def.query
+        .capture_names()
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| i as u32)
 }
 
 fn build_unit(
@@ -101,22 +129,36 @@ fn build_unit(
     let display_source = &source[start_byte..end_byte];
     let body_node = pending.body.unwrap_or(node);
     let body_node_count = count_named_nodes(body_node);
-    if body_node_count < options.body_node_count_threshold { return None; }
+    if body_node_count < options.body_node_count_threshold {
+        return None;
+    }
 
-    let mut strip: Vec<Range<usize>> = pending.strip.iter()
+    let mut strip: Vec<Range<usize>> = pending
+        .strip
+        .iter()
         .map(|r| r.start.saturating_sub(start_byte)..r.end.saturating_sub(start_byte))
         .collect();
     collect_comment_ranges(node, &def.spec.comment_nodes, start_byte, &mut strip);
     let embedding_text = strip_ranges(display_source, &merge_ranges(&strip));
     let normalized = normalize_for_hash(&embedding_text);
-    if normalized.is_empty() || embedding_text.chars().count() > options.max_body_chars { return None; }
-    let scope = pending.scope.clone().or_else(|| recover_scope(def, source, node));
+    if normalized.is_empty() || embedding_text.chars().count() > options.max_body_chars {
+        return None;
+    }
+    let scope = pending
+        .scope
+        .clone()
+        .or_else(|| recover_scope(def, source, node));
     let span = SourceSpan::new(
-        start_byte, end_byte, node.start_position().row + 1, node.end_position().row + 1,
+        start_byte,
+        end_byte,
+        node.start_position().row + 1,
+        node.end_position().row + 1,
     );
     let body_span = Some(SourceSpan::new(
-        body_node.start_byte(), body_node.end_byte(),
-        body_node.start_position().row + 1, body_node.end_position().row + 1,
+        body_node.start_byte(),
+        body_node.end_byte(),
+        body_node.start_position().row + 1,
+        body_node.end_position().row + 1,
     ));
     let source_hash = sha256_hex(display_source);
     let normalized_body_hash = sha256_hex(&normalized);
@@ -132,7 +174,11 @@ fn build_unit(
         normalized_body_hash: normalized_body_hash.clone(),
         representations: vec![
             Representation::new(RepresentationKind::FullSource, display_source, source_hash),
-            Representation::new(RepresentationKind::Implementation, embedding_text, normalized_body_hash),
+            Representation::new(
+                RepresentationKind::Implementation,
+                embedding_text,
+                normalized_body_hash,
+            ),
         ],
     })
 }
@@ -142,17 +188,31 @@ fn count_named_nodes(node: Node<'_>) -> usize {
     let mut cursor = node.walk();
     let mut done = false;
     while !done {
-        if cursor.node().is_named() { count += 1; }
-        if cursor.goto_first_child() { continue; }
+        if cursor.node().is_named() {
+            count += 1;
+        }
+        if cursor.goto_first_child() {
+            continue;
+        }
         loop {
-            if cursor.goto_next_sibling() { break; }
-            if !cursor.goto_parent() || cursor.node() == node { done = true; break; }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+            if !cursor.goto_parent() || cursor.node() == node {
+                done = true;
+                break;
+            }
         }
     }
     count.saturating_sub(1)
 }
 
-fn collect_comment_ranges(node: Node<'_>, kinds: &[String], unit_start: usize, out: &mut Vec<Range<usize>>) {
+fn collect_comment_ranges(
+    node: Node<'_>,
+    kinds: &[String],
+    unit_start: usize,
+    out: &mut Vec<Range<usize>>,
+) {
     let mut stack = vec![node];
     while let Some(current) = stack.pop() {
         if kinds.iter().any(|kind| kind == current.kind()) {
@@ -161,7 +221,9 @@ fn collect_comment_ranges(node: Node<'_>, kinds: &[String], unit_start: usize, o
             continue;
         }
         for i in 0..current.child_count() as u32 {
-            if let Some(child) = current.child(i) { stack.push(child); }
+            if let Some(child) = current.child(i) {
+                stack.push(child);
+            }
         }
     }
 }
@@ -172,13 +234,19 @@ fn recover_scope(def: &LanguageDef, source: &str, node: Node<'_>) -> Option<Stri
     while let Some(ancestor) = current {
         for rule in &def.spec.scopes {
             if ancestor.kind() == rule.kind
-                && let Some(name) = ancestor.child_by_field_name(rule.field.as_str()) {
+                && let Some(name) = ancestor.child_by_field_name(rule.field.as_str())
+            {
                 parts.push(source[name.byte_range()].to_string());
             }
         }
         current = ancestor.parent();
     }
-    if parts.is_empty() { None } else { parts.reverse(); Some(parts.join(".")) }
+    if parts.is_empty() {
+        None
+    } else {
+        parts.reverse();
+        Some(parts.join("."))
+    }
 }
 
 #[cfg(test)]
@@ -189,10 +257,23 @@ mod tests {
     #[test]
     fn extracts_parser_neutral_rust_entity() {
         let def = LanguageRegistry::global().get("rust").unwrap();
-        let units = extract_units(def, "fn add(a: i32, b: i32) -> i32 { a + b }", &ExtractOptions { body_node_count_threshold: 1, max_body_chars: 10_000 }).unwrap();
+        let units = extract_units(
+            def,
+            "fn add(a: i32, b: i32) -> i32 { a + b }",
+            &ExtractOptions {
+                body_node_count_threshold: 1,
+                max_body_chars: 10_000,
+            },
+        )
+        .unwrap();
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].name, "add");
         assert_eq!(units[0].kind.as_str(), "function");
-        assert!(units[0].representation_text(&RepresentationKind::Implementation).unwrap().contains("a + b"));
+        assert!(
+            units[0]
+                .representation_text(&RepresentationKind::Implementation)
+                .unwrap()
+                .contains("a + b")
+        );
     }
 }

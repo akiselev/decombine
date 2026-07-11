@@ -373,14 +373,23 @@ impl LanguageRegistry {
                 .map(adapter_by_name)
                 .transpose()
                 .with_context(|| format!("resolving adapter for {id}"))?;
-            languages.insert(id.to_string(), LanguageDef { spec, language, query, adapter });
+            languages.insert(
+                id.to_string(),
+                LanguageDef {
+                    spec,
+                    language,
+                    query,
+                    adapter,
+                },
+            );
         }
         Ok(Self { languages })
     }
 
     pub fn global() -> &'static LanguageRegistry {
         static REGISTRY: OnceLock<LanguageRegistry> = OnceLock::new();
-        REGISTRY.get_or_init(|| LanguageRegistry::load().expect("bundled language assets must compile"))
+        REGISTRY
+            .get_or_init(|| LanguageRegistry::load().expect("bundled language assets must compile"))
     }
 
     pub fn get(&self, id: &str) -> Option<&LanguageDef> {
@@ -406,10 +415,23 @@ mod tests {
     fn all_bundled_languages_load() {
         let registry = LanguageRegistry::global();
         let ids: Vec<&str> = registry.ids().collect();
-        assert_eq!(ids, vec![
-            "c", "cpp", "csharp", "go", "java", "javascript", "kotlin", "php",
-            "python", "ruby", "rust", "typescript"
-        ]);
+        assert_eq!(
+            ids,
+            vec![
+                "c",
+                "cpp",
+                "csharp",
+                "go",
+                "java",
+                "javascript",
+                "kotlin",
+                "php",
+                "python",
+                "ruby",
+                "rust",
+                "typescript"
+            ]
+        );
     }
 
     #[test]
@@ -418,7 +440,10 @@ mod tests {
         for id in crate::config::KNOWN_LANGUAGE_IDS {
             assert!(registry.get(id).is_some(), "config id {id} missing");
         }
-        assert_eq!(registry.ids().count(), crate::config::KNOWN_LANGUAGE_IDS.len());
+        assert_eq!(
+            registry.ids().count(),
+            crate::config::KNOWN_LANGUAGE_IDS.len()
+        );
     }
 
     #[test]

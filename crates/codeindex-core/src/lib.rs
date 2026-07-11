@@ -153,12 +153,7 @@ pub struct SourceSpan {
 }
 
 impl SourceSpan {
-    pub fn new(
-        start_byte: usize,
-        end_byte: usize,
-        start_line: usize,
-        end_line: usize,
-    ) -> Self {
+    pub fn new(start_byte: usize, end_byte: usize, start_line: usize, end_line: usize) -> Self {
         debug_assert!(start_byte <= end_byte);
         debug_assert!(start_line <= end_line);
         Self {
