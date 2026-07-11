@@ -3,22 +3,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-/// Language ids bundled with this binary. Kept in sync with the language
-/// registry assets (Phase 3).
-pub const KNOWN_LANGUAGE_IDS: &[&str] = &[
-    "c",
-    "cpp",
-    "csharp",
-    "go",
-    "java",
-    "javascript",
-    "kotlin",
-    "php",
-    "python",
-    "ruby",
-    "rust",
-    "typescript",
-];
+/// Language IDs owned by the reusable Tree-sitter frontend.
+pub use codeindex_tree_sitter::BUNDLED_LANGUAGE_IDS as KNOWN_LANGUAGE_IDS;
 
 /// Embedding model and execution-provider catalog owned by the reusable backend.
 pub use codeindex_embedding::config::{
