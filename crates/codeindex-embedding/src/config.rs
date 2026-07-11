@@ -148,13 +148,16 @@ impl EmbeddingConfig {
     }
 }
 
+/// Extraction settings needed only when retained embedding text must be
+/// reconstructed from the source corpus.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AnalysisConfig {
+pub struct SourceRecoveryConfig {
     pub body_node_count_threshold: usize,
 }
 
+/// Complete configuration for an embedding projection or token report.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Config {
+pub struct EmbeddingRunConfig {
     pub embedding: EmbeddingConfig,
-    pub analysis: AnalysisConfig,
+    pub source_recovery: SourceRecoveryConfig,
 }
