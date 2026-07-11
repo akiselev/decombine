@@ -50,10 +50,10 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check workspace without default features
-        run: cargo check --workspace --all-targets --no-default-features
+        run: cargo check --quiet --workspace --all-targets --no-default-features
 
       - name: Run workspace tests without default features
-        run: cargo test --workspace --no-default-features
+        run: cargo test --quiet --workspace --no-default-features
 
   clippy:
     name: clippy (no default features)
@@ -71,7 +71,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets --no-default-features -- -D warnings
+        run: cargo clippy --quiet --workspace --all-targets --no-default-features -- -D warnings
 
   check-default:
     name: check (default features)
@@ -87,4 +87,4 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check workspace with default features
-        run: cargo check --workspace --all-targets
+        run: cargo check --quiet --workspace --all-targets
