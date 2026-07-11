@@ -20,101 +20,10 @@ pub const KNOWN_LANGUAGE_IDS: &[&str] = &[
     "typescript",
 ];
 
-/// Embedding models supported by the fastembed backend, with their output
-/// dimensions and whether a quantized variant exists.
-pub const SUPPORTED_MODELS: &[(&str, usize, bool)] = &[
-    ("BGESmallENV15", 384, true),
-    ("BGEBaseENV15", 768, true),
-    ("JinaEmbeddingsV2BaseCode", 768, false),
-    ("AllMiniLML6V2", 384, true),
-    ("GTEBaseENV15", 768, true),
-    ("SnowflakeArcticEmbedM", 768, true),
-    ("SnowflakeArcticEmbedMLong", 768, true),
-    ("NomicEmbedTextV15", 768, true),
-];
-
-/// A model decombine manages itself (downloads + verifies) rather than
-/// delegating to fastembed's catalog. Backed by a local ONNX export loaded
-/// through the custom-model path once materialized; the backend fetches the
-/// files on first use and gates them against these pinned hashes.
-#[derive(Debug, Clone, Copy)]
-pub struct ManagedModel {
-    /// Name used in `embedding.model`.
-    pub name: &'static str,
-    /// Subdirectory under the custom cache the files materialize into.
-    pub cache_id: &'static str,
-    /// Hugging Face repo the files are fetched from.
-    pub repo: &'static str,
-    /// Repo revision (branch/tag/commit) resolved for downloads. Integrity is
-    /// gated by the per-file SHA256 regardless, so a moved branch fails safe.
-    pub revision: &'static str,
-    /// ONNX graph path, relative to the materialized directory.
-    pub onnx_file: &'static str,
-    pub dimensions: usize,
-    /// `mean` or `cls`.
-    pub pooling: &'static str,
-    /// Tokenizer truncation length.
-    pub max_length: usize,
-    /// Files that must be present and hash-verified, relative to the dir.
-    pub files: &'static [ManagedFile],
-}
-
-/// One file of a `ManagedModel`, pinned by content hash and size.
-#[derive(Debug, Clone, Copy)]
-pub struct ManagedFile {
-    pub path: &'static str,
-    pub sha256: &'static str,
-    pub size: u64,
-}
-
-/// Models decombine downloads and verifies itself. `CodeRankEmbed` is the
-/// quality-leading code model (2048-token context); its files are the
-/// community `Zenabius/CodeRankEmbed-onnx` fp32 export, verified against the
-/// Torch reference at pooled cosine 1.000000.
-pub const MANAGED_MODELS: &[ManagedModel] = &[ManagedModel {
-    name: "CodeRankEmbed",
-    cache_id: "coderankembed",
-    repo: "Zenabius/CodeRankEmbed-onnx",
-    revision: "main",
-    onnx_file: "onnx/model.onnx",
-    dimensions: 768,
-    pooling: "mean",
-    max_length: 2048,
-    files: &[
-        ManagedFile {
-            path: "onnx/model.onnx",
-            sha256: "87edaf9f6d544e9d46ed81e1e13610ac01b1c1904e3b26fcf1ce6744a0319ffa",
-            size: 548_260_181,
-        },
-        ManagedFile {
-            path: "tokenizer.json",
-            sha256: "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
-            size: 711_649,
-        },
-        ManagedFile {
-            path: "config.json",
-            sha256: "5ff856a41d0f53ef2d74520627d464bd75c2efd8f26f381bd528654895c29b6c",
-            size: 1_525,
-        },
-        ManagedFile {
-            path: "special_tokens_map.json",
-            sha256: "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
-            size: 695,
-        },
-        ManagedFile {
-            path: "tokenizer_config.json",
-            sha256: "7809f768ee3614618b3f1b91dcbfab4f6a9d4b79fb1ad5d17feb65a7c1bb5b7a",
-            size: 1_417,
-        },
-    ],
-}];
-
-/// The managed model of this name, if any.
-pub fn managed_model(name: &str) -> Option<&'static ManagedModel> {
-    MANAGED_MODELS.iter().find(|m| m.name == name)
-}
-
-pub const EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "coreml", "directml", "openvino"];
+/// Embedding model and execution-provider catalog owned by the reusable backend.
+pub use codeindex_embedding::config::{
+    EXECUTION_PROVIDERS, MANAGED_MODELS, ManagedFile, ManagedModel, SUPPORTED_MODELS, managed_model,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
