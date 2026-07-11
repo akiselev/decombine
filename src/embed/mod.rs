@@ -4,7 +4,7 @@ use crate::config::{
     Config, CustomModelConfig as AppCustomModelConfig, EmbeddingConfig as AppEmbeddingConfig,
     ProviderMode as AppProviderMode,
 };
-use crate::db::{Db, ModelId, ModelIdentity};
+use crate::db::Db;
 
 #[cfg(feature = "fastembed")]
 pub use codeindex_embedding::embed::fastembed_backend;
@@ -45,17 +45,17 @@ fn embedding(config: &AppEmbeddingConfig) -> codeindex_embedding::config::Embedd
     }
 }
 
-fn run_config(config: &Config) -> codeindex_embedding::config::Config {
-    codeindex_embedding::config::Config {
+fn run_config(config: &Config) -> codeindex_embedding::config::EmbeddingRunConfig {
+    codeindex_embedding::config::EmbeddingRunConfig {
         embedding: embedding(&config.embedding),
-        analysis: codeindex_embedding::config::AnalysisConfig {
+        source_recovery: codeindex_embedding::config::SourceRecoveryConfig {
             body_node_count_threshold: config.analysis.body_node_count_threshold,
         },
     }
 }
 
 pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
-    codeindex_embedding::embedder_from_config(&run_config(config))
+    codeindex_embedding::embedder_from_config(&embedding(&config.embedding))
 }
 
 pub fn embed_pending(db: &Db, embedder: &mut dyn Embedder, config: &Config) -> Result<EmbedStats> {
@@ -78,6 +78,3 @@ pub fn token_report(
 ) -> Result<Vec<LanguageTokens>> {
     codeindex_embedding::token_report(db, &run_config(config), embedder)
 }
-
-#[allow(dead_code)]
-fn _model_types_are_compatible(_: ModelId, _: &ModelIdentity) {}
