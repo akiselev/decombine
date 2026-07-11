@@ -419,6 +419,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "codeindex-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "codeindex-core",
+ "codeindex-embedding",
+ "codeindex-query",
+ "codeindex-sqlite",
+ "rayon",
+ "rusqlite",
+]
+
+[[package]]
 name = "codeindex-sqlite"
 version = "0.1.0"
 dependencies = [
@@ -667,6 +680,7 @@ dependencies = [
  "codeindex-embedding",
  "codeindex-indexer",
  "codeindex-query",
+ "codeindex-search",
  "codeindex-sqlite",
  "codeindex-tree-sitter",
  "globset",

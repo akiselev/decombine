@@ -55,14 +55,22 @@ Deeper docs: `architecture.md` (design), `PLAN.md` (phases), `EXPERIMENTS.md`
 ## Code map and gotchas
 
 - The indexing substrate (scan, tree-sitter extraction + language catalog,
-  SQLite persistence, embedding backends + batch packer, query ranking) now
-  lives in the standalone **codeindex** workspace at `../codeindex`, consumed
-  as path deps (`codeindex-core`, `-tree-sitter`, `-sqlite`, `-indexer`,
-  `-embedding`, `-query`). decombine's `src/{db,index,embed,query}` are thin
-  compatibility adapters over those crates. Language catalog and adapters:
-  `../codeindex/crates/tree-sitter` (`assets/languages/<id>.toml` +
-  `<id>/units.scm`, adapters in `src/language.rs`). Embedding backend + packer:
-  `../codeindex/crates/embedding`.
+  SQLite persistence, embedding backends + batch packer, query ranking, and the
+  end-to-end search service) now lives in the standalone **codeindex** workspace
+  at `../codeindex`, consumed as path deps (`codeindex-core`, `-tree-sitter`,
+  `-sqlite`, `-indexer`, `-embedding`, `-query`, `-search`). decombine's
+  `src/{db,index,embed,query}` are thin compatibility adapters over those
+  crates. Language catalog and adapters: `../codeindex/crates/tree-sitter`
+  (`assets/languages/<id>.toml` + `<id>/units.scm`, adapters in
+  `src/language.rs`). Embedding backend + packer: `../codeindex/crates/embedding`.
+- The loaded corpus and search operations live in **`codeindex-search`**
+  (`SearchIndex::{load, search_text, search_vector, similar_to_unit}`,
+  `resolve_selector`, `VectorStore`). decombine's `analyze/{context,vector_store}.rs`
+  re-export `SearchIndex as AnalysisContext`, `CodeUnitRef`, and `VectorStore`
+  from it (keeping only the decombine-specific `Analyzer` trait locally), and
+  `src/query/mod.rs`'s `search`/`similar` are presentation over
+  `SearchIndex::{search_text,similar_to_unit}` — embed + identity-verify + rank +
+  resolve all happen in the crate now.
 - `src/analyze/`: `duplicate/` (candidate pairs → rerank → distinct-body-
   bounded union-find → `ClusterKind` sectioning), `compare/`, `concerns/`.
 - `src/report/markdown.rs`: all report rendering; duplicate index is

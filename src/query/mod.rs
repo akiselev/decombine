@@ -2,58 +2,19 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result, ensure};
-use codeindex_query::{UnitView, WhereFilter, identity_diff, rank_candidates};
+use anyhow::{Result, ensure};
+use codeindex_query::WhereFilter;
 pub use codeindex_query::{unit_id, unit_line};
+use codeindex_search::resolve_selector;
 use serde_json::{Value, json};
 
 use crate::analyze::context::{AnalysisContext, CodeUnitRef, load_projects_and_units};
 use crate::cli::{CapabilitiesArgs, InspectArgs, SearchArgs, SimilarArgs, UnitsArgs};
 use crate::config::Config;
 use crate::db::{Db, ModelIdentity, Project};
-use crate::embed::normalize_in_place;
 
 pub const QUERY_SCHEMA_VERSION: &str = "decombine.query.v1";
 pub const CAPABILITIES_SCHEMA_VERSION: &str = "decombine.capabilities.v1";
-
-impl UnitView for CodeUnitRef {
-    fn project_label(&self) -> &str {
-        &self.project_label
-    }
-    fn relative_path(&self) -> &str {
-        &self.relative_path
-    }
-    fn language_id(&self) -> &str {
-        &self.language_id
-    }
-    fn kind(&self) -> &str {
-        &self.kind
-    }
-    fn name(&self) -> &str {
-        &self.name
-    }
-    fn scope(&self) -> Option<&str> {
-        self.scope.as_deref()
-    }
-    fn start_byte(&self) -> usize {
-        self.start_byte
-    }
-    fn end_byte(&self) -> usize {
-        self.end_byte
-    }
-    fn start_line(&self) -> usize {
-        self.start_line
-    }
-    fn end_line(&self) -> usize {
-        self.end_line
-    }
-    fn body_node_count(&self) -> usize {
-        self.body_node_count
-    }
-    fn normalized_body_hash(&self) -> &str {
-        &self.normalized_body_hash
-    }
-}
 
 pub fn unit_json(unit: &CodeUnitRef) -> Value {
     json!({
@@ -116,18 +77,7 @@ fn emit(value: &Value) -> Result<()> {
 }
 
 fn resolve_unit(units: &[CodeUnitRef], selector: &str) -> Result<usize> {
-    ensure!(
-        selector.starts_with("unit:"),
-        "selector {selector:?} is not a unit selector (expected `unit:<id>` as printed by query/report output)"
-    );
-    units
-        .iter()
-        .position(|unit| unit_id(unit) == selector)
-        .with_context(|| {
-            format!(
-                "{selector} not found in the current index. Unit IDs are deterministic per index generation and change when code is re-indexed; re-run the query that produced the ID, or list units with `decombine query units`."
-            )
-        })
+    resolve_selector(units, selector)
 }
 
 fn unit_source(projects: &[Project], unit: &CodeUnitRef) -> Option<String> {
@@ -332,31 +282,19 @@ pub fn similar(db: &Db, args: &SimilarArgs, mode: &str) -> Result<()> {
     );
     let filter = WhereFilter::parse(args.r#where.as_deref())?;
     let threshold = args.threshold.unwrap_or(-1.0);
-    let query_row = ctx
-        .vectors
-        .row_for_unit(query_index)
-        .expect("checked above");
-    let query_vector = ctx.vectors.vector(query_row).to_vec();
-    let candidates = (0..ctx.units.len()).filter_map(|index| {
-        if index == query_index || !filter.matches(&ctx.units[index]) {
-            return None;
-        }
-        let row = ctx.vectors.row_for_unit(index)?;
-        Some((index, ctx.vectors.vector(row)))
-    });
-    let mut scored = rank_candidates(&query_vector, candidates, threshold);
-    let matched = scored.len();
-    scored.truncate(args.limit);
+    let results = ctx.similar_to_unit(query_index, &filter, args.limit, threshold)?;
+    let matched = results.matched;
+    let hits = &results.hits;
 
     if args.json {
-        let items = scored
+        let items = hits
             .iter()
-            .map(|scored| {
-                let mut item = unit_json(&ctx.units[scored.index]);
-                item["score"] = json!(scored.score);
+            .map(|hit| {
+                let mut item = unit_json(&ctx.units[hit.index]);
+                item["score"] = json!(hit.score);
                 if args.why {
                     item["why"] = json!({
-                        "scores": {"cosine": scored.score},
+                        "scores": {"cosine": hit.score},
                         "evidence": [{"source": "vector", "unit": args.unit}],
                         "decision": {
                             "reason": "vector_rank",
@@ -381,22 +319,18 @@ pub fn similar(db: &Db, args: &SimilarArgs, mode: &str) -> Result<()> {
                     "where": args.r#where,
                 },
             }),
-            summary_json(matched, scored.len()),
+            summary_json(matched, hits.len()),
             items,
         ));
     }
     println!("query: {}", unit_line(&ctx.units[query_index]));
-    for scored in &scored {
-        println!(
-            "{:.4} {}",
-            scored.score,
-            unit_line(&ctx.units[scored.index])
-        );
+    for hit in hits {
+        println!("{:.4} {}", hit.score, unit_line(&ctx.units[hit.index]));
     }
-    if scored.len() < matched {
+    if hits.len() < matched {
         eprintln!(
             "(top {} of {matched} candidates; raise --limit for more)",
-            scored.len()
+            hits.len()
         );
     }
     Ok(())
@@ -405,36 +339,20 @@ pub fn similar(db: &Db, args: &SimilarArgs, mode: &str) -> Result<()> {
 pub fn search(config: &Config, db: &Db, args: &SearchArgs) -> Result<()> {
     let ctx = AnalysisContext::load(db, &[])?;
     let mut embedder = crate::embed::embedder_from_config(config)?;
-    let identity = embedder.identity();
-    ensure!(
-        *identity == ctx.identity,
-        "search queries must be embedded with the same model identity as the indexed code units; the configured embedder differs from the database on: {}",
-        identity_diff(&ctx.identity, identity).join(", ")
-    );
-    let mut vectors = embedder.embed(std::slice::from_ref(&args.text))?;
-    let query_vector = &mut vectors[0];
-    normalize_in_place(query_vector);
     let filter = WhereFilter::parse(args.r#where.as_deref())?;
-    let candidates = (0..ctx.units.len()).filter_map(|index| {
-        if !filter.matches(&ctx.units[index]) {
-            return None;
-        }
-        let row = ctx.vectors.row_for_unit(index)?;
-        Some((index, ctx.vectors.vector(row)))
-    });
-    let mut scored = rank_candidates(query_vector, candidates, -1.0);
-    let matched = scored.len();
-    scored.truncate(args.limit);
+    let results = ctx.search_text(embedder.as_mut(), &args.text, &filter, args.limit)?;
+    let matched = results.matched;
+    let hits = &results.hits;
 
     if args.json {
-        let items = scored
+        let items = hits
             .iter()
-            .map(|scored| {
-                let mut item = unit_json(&ctx.units[scored.index]);
-                item["score"] = json!(scored.score);
+            .map(|hit| {
+                let mut item = unit_json(&ctx.units[hit.index]);
+                item["score"] = json!(hit.score);
                 if args.why {
                     item["why"] = json!({
-                        "scores": {"cosine": scored.score},
+                        "scores": {"cosine": hit.score},
                         "evidence": [{"source": "vector", "query": args.text}],
                         "decision": {
                             "reason": "vector_rank",
@@ -453,21 +371,17 @@ pub fn search(config: &Config, db: &Db, args: &SearchArgs) -> Result<()> {
                 "mode": "search",
                 "args": {"text": args.text, "limit": args.limit, "where": args.r#where},
             }),
-            summary_json(matched, scored.len()),
+            summary_json(matched, hits.len()),
             items,
         ));
     }
-    for scored in &scored {
-        println!(
-            "{:.4} {}",
-            scored.score,
-            unit_line(&ctx.units[scored.index])
-        );
+    for hit in hits {
+        println!("{:.4} {}", hit.score, unit_line(&ctx.units[hit.index]));
     }
-    if scored.len() < matched {
+    if hits.len() < matched {
         eprintln!(
             "(top {} of {matched} embedded units; raise --limit for more)",
-            scored.len()
+            hits.len()
         );
     }
     Ok(())

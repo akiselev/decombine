@@ -19,6 +19,7 @@ codeindex-core = { path = "../codeindex/crates/core" }
 codeindex-embedding = { path = "../codeindex/crates/embedding", default-features = false }
 codeindex-indexer = { path = "../codeindex/crates/indexer" }
 codeindex-query = { path = "../codeindex/crates/query" }
+codeindex-search = { path = "../codeindex/crates/search" }
 codeindex-sqlite = { path = "../codeindex/crates/sqlite" }
 codeindex-tree-sitter = { path = "../codeindex/crates/tree-sitter" }
 globset = "0.4.18"
