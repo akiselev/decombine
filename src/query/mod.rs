@@ -3,7 +3,8 @@
 use std::path::Path;
 
 use anyhow::{Context as _, Result, ensure};
-use codeindex_query::{UnitView, WhereFilter, identity_diff, rank_candidates, unit_id, unit_line};
+use codeindex_query::{UnitView, WhereFilter, identity_diff, rank_candidates};
+pub use codeindex_query::{unit_id, unit_line};
 use serde_json::{Value, json};
 
 use crate::analyze::context::{AnalysisContext, CodeUnitRef, load_projects_and_units};
