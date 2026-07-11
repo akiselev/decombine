@@ -9,7 +9,12 @@ resolver = "3"
 name = "decombine"
 version = "0.1.0"
 edition = "2024"
+authors = ["Alexander Kiselev <alex@akiselev.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/akiselev/decombine"
 description = "Embedding-based detector for non-exact code duplication, concern signals, and project comparison"
+keywords = ["code-duplication", "embeddings", "clone-detection", "static-analysis", "code-search"]
+categories = ["development-tools", "command-line-utilities"]
 publish = false
 
 [dependencies]
