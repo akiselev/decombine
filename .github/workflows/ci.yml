@@ -50,10 +50,32 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check workspace without default features
-        run: cargo check --quiet --workspace --all-targets --no-default-features
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --quiet --workspace --all-targets --no-default-features 2>&1 | tee check-no-default.log
+
+      - name: Upload check diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-no-default-diagnostics
+          path: check-no-default.log
+          retention-days: 1
 
       - name: Run workspace tests without default features
-        run: cargo test --quiet --workspace --no-default-features
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --quiet --workspace --no-default-features 2>&1 | tee test-no-default.log
+
+      - name: Upload test diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-no-default-diagnostics
+          path: test-no-default.log
+          retention-days: 1
 
   clippy:
     name: clippy (no default features)
@@ -71,7 +93,18 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run clippy
-        run: cargo clippy --quiet --workspace --all-targets --no-default-features -- -D warnings
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo clippy --quiet --workspace --all-targets --no-default-features -- -D warnings 2>&1 | tee clippy-no-default.log
+
+      - name: Upload clippy diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: clippy-no-default-diagnostics
+          path: clippy-no-default.log
+          retention-days: 1
 
   check-default:
     name: check (default features)
@@ -87,4 +120,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check workspace with default features
-        run: cargo check --quiet --workspace --all-targets
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo check --quiet --workspace --all-targets 2>&1 | tee check-default.log
+
+      - name: Upload default-feature diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-default-diagnostics
+          path: check-default.log
+          retention-days: 1
