@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
 
-use crate::config::Config;
+use crate::config::{EmbeddingConfig, EmbeddingRunConfig};
 use crate::db::{Db, ModelId, ModelIdentity};
 use crate::index::extractor::{ExtractOptions, extract_units};
 use crate::index::language::LanguageRegistry;
@@ -43,12 +43,10 @@ pub trait Embedder {
 
 /// Build the configured embedder. Only the fastembed backend is selectable
 /// from config; the hash backend is for tests.
-pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
-    match config.embedding.backend.as_str() {
+pub fn embedder_from_config(config: &EmbeddingConfig) -> Result<Box<dyn Embedder>> {
+    match config.backend.as_str() {
         #[cfg(feature = "fastembed")]
-        "fastembed" => Ok(Box::new(fastembed_backend::FastembedBackend::new(
-            &config.embedding,
-        )?)),
+        "fastembed" => Ok(Box::new(fastembed_backend::FastembedBackend::new(config)?)),
         #[cfg(not(feature = "fastembed"))]
         "fastembed" => anyhow::bail!(
             "this binary was built without the `fastembed` feature; \
@@ -58,7 +56,7 @@ pub fn embedder_from_config(config: &Config) -> Result<Box<dyn Embedder>> {
     }
 }
 
-/// Accelerator execution providers decombine can request, in priority order.
+/// Accelerator execution providers the local backend can request, in priority order.
 pub const ACCELERATOR_PROVIDERS: &[&str] = &["cuda", "directml", "coreml", "openvino"];
 
 /// One provider's readiness, as reported by `doctor`.
@@ -215,14 +213,18 @@ pub struct EmbedProgress {
 
 /// Embed every distinct un-embedded body hash with this embedder, enforcing
 /// model-identity immutability and resuming where a prior run stopped.
-pub fn embed_pending(db: &Db, embedder: &mut dyn Embedder, config: &Config) -> Result<EmbedStats> {
+pub fn embed_pending(
+    db: &Db,
+    embedder: &mut dyn Embedder,
+    config: &EmbeddingRunConfig,
+) -> Result<EmbedStats> {
     embed_pending_with_progress(db, embedder, config, |_| {})
 }
 
 pub fn embed_pending_with_progress(
     db: &Db,
     embedder: &mut dyn Embedder,
-    config: &Config,
+    config: &EmbeddingRunConfig,
     mut progress: impl FnMut(EmbedProgress),
 ) -> Result<EmbedStats> {
     let identity = embedder.identity().clone();
@@ -349,7 +351,7 @@ pub struct LanguageTokens {
 /// backend cannot count tokens, are skipped.
 pub fn token_report(
     db: &Db,
-    config: &Config,
+    config: &EmbeddingRunConfig,
     embedder: &dyn Embedder,
 ) -> Result<Vec<LanguageTokens>> {
     let rows = db.all_unit_texts()?;
@@ -451,13 +453,13 @@ pub fn normalize_in_place(vector: &mut [f32]) {
 /// hash and are picked up on the next index+embed cycle.
 fn recover_texts_from_source(
     db: &Db,
-    config: &Config,
+    config: &EmbeddingRunConfig,
     hashes: &[String],
 ) -> Result<HashMap<String, String>> {
     let wanted: std::collections::HashSet<&str> = hashes.iter().map(|s| s.as_str()).collect();
     let locations = db.locations_for_hashes(hashes)?;
     let options = ExtractOptions {
-        body_node_count_threshold: config.analysis.body_node_count_threshold,
+        body_node_count_threshold: config.source_recovery.body_node_count_threshold,
         max_body_chars: config.embedding.max_body_chars,
     };
     let registry = LanguageRegistry::global();
