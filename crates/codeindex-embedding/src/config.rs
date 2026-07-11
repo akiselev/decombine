@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+/// Fastembed catalog models supported by the local backend, together with
+/// output dimensions and whether a quantized variant is available.
 pub const SUPPORTED_MODELS: &[(&str, usize, bool)] = &[
     ("BGESmallENV15", 384, true),
     ("BGEBaseENV15", 768, true),
@@ -11,6 +13,11 @@ pub const SUPPORTED_MODELS: &[(&str, usize, bool)] = &[
     ("NomicEmbedTextV15", 768, true),
 ];
 
+/// Execution-provider names understood by the local ONNX backend.
+pub const EXECUTION_PROVIDERS: &[&str] = &["cpu", "cuda", "coreml", "directml", "openvino"];
+
+/// A model materialized and hash-verified by the embedding crate instead of
+/// delegated to fastembed's built-in catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct ManagedModel {
     pub name: &'static str,
