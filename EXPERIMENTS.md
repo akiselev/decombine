@@ -664,3 +664,31 @@ Reran the full 10-run sweep on fresh DBs with the four method changes. Zero fail
   snapshots unchanged, `unit:`/`cluster:`/`match:` IDs stable (single
   `unit_id`/`unit_line` in `codeindex-query`). See `docs/codeindex-architecture.md`
   and TODO.md "Codeindex crate extraction — review follow-ups".
+
+## 2026-10-16 codeindex explicit-space port + cadabra3 duplicates
+
+- Port: decombine migrated to codeindex's explicit embedding-space API. decombine
+  embeds/analyzes only `default/implementation` (same text and hash as the old
+  single-model body embedding; extraction golden snapshots unchanged) via
+  `embed_space_pending`, not codeindex's all-channel `embed_pending`.
+- Run: `runs/cadabra3/` (config + DB + report; source `/projects/sinbad/cadabra3`,
+  rust+python, `target/**`/`docs/**` excluded), CodeRankEmbed, CodeRank default
+  thresholds 0.70/0.81/0.85, `max_batch_token_area: 8000000` (memory-constrained
+  box: other services held ~44 GB of 62 GB).
+- First embed attempt at 16M area was reaped by the host for low system memory
+  (not decombine's fault). Rerun at 8M under an external MemAvailable watchdog
+  (`runs/cadabra3/watchdog.sh`, kill <4 GB, resume >=8 GB): 4736 bodies in ~113
+  min, observed RSS ~5.4–5.6 GB (above the ~3 GB guessed from halving 16M), never
+  killed. 88 unresolved because cadabra3 was edited mid-run (report retention
+  re-reads source); incremental re-index (54 files) + embed (266 bodies, 0
+  unresolved) fixed it cheaply.
+- Result (5392 units): 6722 candidate pairs → 657 clusters: product 386, mixed
+  68, test/docs 203. Of product: 227 same-crate, 18 cross-crate production, 96
+  zz-experiment↔production (78 of them cadabra-ssi↔zz-quadric-experiment, i.e.
+  promoted experiment code still duplicated), 45 zz-only. Strongest cross-crate
+  production signals: `vec3` (arrangements spherical_circle ↔ ssi chart),
+  `to_hex`/`digest_hex` ×4 (arrangements/geometry/provider), `into_parameter`
+  (brep wire/exact_v1 ↔ geometry pcurve_wire), `from`/`of`/`from_parameter`.
+- Follow-ups: built-in `embedding.memory_guard` (batch-boundary pause in codeindex,
+  optional timer supervisor in decombine) added the same day, not yet exercised on
+  a real model; measure the 8M-area RSS vs the 16M baselines before quoting it.

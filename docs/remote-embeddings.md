@@ -27,8 +27,13 @@ embedding:
     # query_input_type: query
     # query_prefix: "Instruct: ...\nQuery: "   # Qwen3 query instruction
     # max_input_tokens: 32768       # recorded in the identity; default 8192
-    # max_inputs_per_request: 64
-    # concurrency: 4
+    # max_inputs_per_request: 64    # texts per API call
+    # max_request_chars: 100000     # summed input chars per API call
+    # concurrency: 8                # ceiling on API calls in flight
+    # adaptive_concurrency: true    # halve on 429, grow back on success
+    # backoff_initial_ms: 1000      # jittered exponential backoff
+    # backoff_max_ms: 60000
+    # rate_limit_max_wait_secs: 900 # fail after this long rate limited
     # api_key_env: OPENROUTER_API_KEY   # the default
     # base_url: https://openrouter.ai/api/v1
 ```
@@ -59,6 +64,35 @@ Inputs are not tokenized locally. `max_body_chars` (default 10 000 chars)
 keeps bodies well under 8K-context models, `max_batch_token_area` is ignored,
 and token stats are chars/4 estimates. The `embed` command prints the
 request count, prompt tokens and the cost reported by OpenRouter.
+
+### Parallelism and rate limits
+
+Each API call carries up to `max_inputs_per_request` texts and
+`max_request_chars` characters. Up to `concurrency` calls run at once. For
+remote backends the indexer's `batch_size`/`max_batch_chars` are replaced by
+two waves of full calls (`2 × concurrency × max_inputs_per_request` items).
+Every request slot stays busy, and work-stealing absorbs one slow call
+before the batch has to wait for it. Finished batches are persisted, so an
+interrupted run resumes.
+
+All workers share one rate gate:
+
+- A **429** pauses every worker until `Retry-After` (seconds or HTTP date).
+  Without that header the pause is a jittered exponential delay
+  (`backoff_initial_ms` doubling to `backoff_max_ms`, half fixed and half
+  random). One API is not hit by N independent retry loops.
+- With `adaptive_concurrency`, the first 429 in a pause window halves the
+  calls allowed in flight. Later 429s from calls already in flight don't
+  cut it again. After `limit` consecutive successes it grows by one, back up
+  to `concurrency`.
+- A call fails only after it has been rate limited for
+  `rate_limit_max_wait_secs` in total. Other transient errors (5xx,
+  timeouts, resets) retry that call alone with jittered backoff, up to
+  `max_retries`. A 413 halves the call.
+
+The `embed` summary reports retries, 429 count and the lowest concurrency
+reached. A low floor means `concurrency` is set above what the account or
+upstream allows.
 
 ### Raw cosine thresholds do not port
 
@@ -103,11 +137,13 @@ fails loudly.
 Remote execution is split in `codeindex-embedding::embed::remote`:
 
 - `RemoteBackend` handles everything provider-independent: request
-  chunking, concurrency, retries with `Retry-After`, halving requests on 413,
-  width checks, normalization, input-order reassembly and usage metering.
+  splitting, workers behind the shared `throttle::RateGate`, retries,
+  halving requests on 413, width checks, normalization, input-order
+  reassembly, usage metering, and the `batch_limits` hint to the indexer.
 - `RemoteProvider` (trait) is the provider-specific translator: `endpoint`,
   `headers`, `request_body(role, inputs)` (which must express the data
-  policy), `interpret(status, body) -> Reply`, `revision` (settings that
+  policy), `interpret(status, body) -> Reply` (`RateLimited` for 429s so
+  the gate sees them), `revision` (settings that
   change vectors), `routing`, and `disclosure`.
 - `openai_compat` holds the shared OpenAI-style body/response handling, so an
   OpenAI-compatible provider (OpenAI, Voyage direct, DeepInfra, a local

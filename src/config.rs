@@ -360,11 +360,32 @@ pub struct RemoteConfig {
     /// (`OPENROUTER_API_KEY`).
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Texts per API call.
     #[serde(default = "default_remote_max_inputs_per_request")]
     pub max_inputs_per_request: usize,
-    /// Concurrent requests per embed batch.
+    /// Summed input characters per API call; long bodies split into more
+    /// calls rather than one oversized one.
+    #[serde(default = "default_remote_max_request_chars")]
+    pub max_request_chars: usize,
+    /// Ceiling on API calls in flight at once. `batch_size` and
+    /// `max_batch_chars` are ignored for remote backends: each batch is
+    /// sized to two waves of full calls at this concurrency.
     #[serde(default = "default_remote_concurrency")]
     pub concurrency: usize,
+    /// On each 429, halve the calls in flight (growing back by one per run of
+    /// successes). `false` keeps `concurrency` fixed; 429s still pause every
+    /// worker until `Retry-After`.
+    #[serde(default = "default_true")]
+    pub adaptive_concurrency: bool,
+    /// Jittered exponential backoff for transient errors and for 429s that
+    /// carry no `Retry-After`.
+    #[serde(default = "default_remote_backoff_initial_ms")]
+    pub backoff_initial_ms: u64,
+    #[serde(default = "default_remote_backoff_max_ms")]
+    pub backoff_max_ms: u64,
+    /// Fail once a single call has been rate limited this long in total.
+    #[serde(default = "default_remote_rate_limit_max_wait_secs")]
+    pub rate_limit_max_wait_secs: u64,
     #[serde(default = "default_remote_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default = "default_remote_max_retries")]
@@ -682,8 +703,20 @@ fn default_remote_max_input_tokens() -> usize {
 fn default_remote_max_inputs_per_request() -> usize {
     64
 }
+fn default_remote_max_request_chars() -> usize {
+    100_000
+}
 fn default_remote_concurrency() -> usize {
-    4
+    8
+}
+fn default_remote_backoff_initial_ms() -> u64 {
+    1_000
+}
+fn default_remote_backoff_max_ms() -> u64 {
+    60_000
+}
+fn default_remote_rate_limit_max_wait_secs() -> u64 {
+    900
 }
 fn default_remote_timeout_secs() -> u64 {
     120
@@ -915,6 +948,15 @@ impl Config {
         }
         if !(1..=64).contains(&remote.concurrency) {
             return bad("concurrency", "must be between 1 and 64");
+        }
+        if remote.max_request_chars < 1000 {
+            return bad("max_request_chars", "must be at least 1000");
+        }
+        if remote.backoff_initial_ms == 0 || remote.backoff_max_ms < remote.backoff_initial_ms {
+            return bad(
+                "backoff_initial_ms",
+                "must be positive and no larger than backoff_max_ms",
+            );
         }
         if remote.timeout_secs == 0 {
             return bad("timeout_secs", "must be positive");
@@ -1530,6 +1572,8 @@ mod tests {
         assert_eq!(remote.data_policy, DataPolicy::Zdr);
         assert_eq!(remote.api_key_env, None);
         assert_eq!(remote.max_inputs_per_request, 64);
+        assert_eq!(remote.concurrency, 8);
+        assert!(remote.adaptive_concurrency);
 
         // A local catalog name is not a provider model id.
         config.embedding.model = "CodeRankEmbed".into();
