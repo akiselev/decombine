@@ -11,7 +11,7 @@ use crate::analyze::context::AnalysisContext;
 use crate::analyze::duplicate::cross_directory::nearest_neighbor_dispersion;
 use crate::analyze::paths::{directory_entropy, directory_of, top_level_module};
 use crate::config::ConcernsConfig;
-use crate::embed::{Embedder, normalize_in_place};
+use crate::embed::{EmbedRequest, Embedder, apply_output_dimensions, normalize_in_place};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScoredUnit {
@@ -58,32 +58,38 @@ impl ConcernAnalyzer<'_> {
         ctx: &AnalysisContext,
         config: &ConcernsConfig,
     ) -> Result<ConcernReport> {
-        let identity = self.embedder.identity();
+        let contract = self.embedder.contract();
+        let space = &ctx.space().identity;
         ensure!(
-            *identity == ctx.identity,
+            *contract == space.model,
             "concern queries must be embedded with the same model as code units \
-             (context: {}/{}, embedder: {}/{})",
-            ctx.identity.backend,
-            ctx.identity.model,
-            identity.backend,
-            identity.model
+             (context: {}, embedder: {}; differing: {})",
+            space.model.model,
+            contract.model,
+            codeindex_query::contract_diff(&space.model, contract).join(", ")
         );
 
         let mut queries = config.queries.clone();
         queries.sort_by(|a, b| a.name.cmp(&b.name));
         let texts: Vec<String> = queries.iter().map(|q| q.query.clone()).collect();
-        let mut vectors = self.embedder.embed(&texts)?;
+        let inputs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let mut vectors = self.embedder.embed(&EmbedRequest::queries(&inputs, None))?;
         for vector in &mut vectors {
             normalize_in_place(vector);
+            apply_output_dimensions(
+                vector,
+                space.document_side.output_dimensions,
+                space.model.normalize,
+            )?;
         }
 
         let mut findings = Vec::with_capacity(queries.len());
         for (query, query_vector) in queries.iter().zip(&vectors) {
             let mut scored: Vec<ScoredUnit> = (0..ctx.units.len())
                 .filter_map(|unit| {
-                    let row = ctx.vectors.row_for_unit(unit)?;
+                    let row = ctx.vectors().row_for_unit(unit)?;
                     let projection =
-                        crate::analyze::vector_store::dot(ctx.vectors.vector(row), query_vector);
+                        crate::analyze::vector_store::dot(ctx.vectors().vector(row), query_vector);
                     (projection >= config.min_projection as f32)
                         .then_some(ScoredUnit { unit, projection })
                 })

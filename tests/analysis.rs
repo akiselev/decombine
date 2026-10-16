@@ -2,14 +2,16 @@
 //! with deterministic fixture vectors, plus database-backed context tests.
 
 use anyhow::Result;
+use codeindex_search::storage::ProjectRecord;
 use decombine::analyze::compare::{CompareAnalyzer, MatchClass};
 use decombine::analyze::concerns::ConcernAnalyzer;
 use decombine::analyze::duplicate::DuplicateAnalyzer;
 use decombine::analyze::vector_store::VectorStore;
 use decombine::analyze::{AnalysisContext, Analyzer, CodeUnitRef};
 use decombine::config::{AnalysisConfig, ComparisonConfig, ConcernQuery, ConcernsConfig};
-use decombine::db::{ModelIdentity, Project};
-use decombine::embed::Embedder;
+use decombine::db::ModelIdentity;
+use decombine::db::{ExecutionInfo, ModelContract};
+use decombine::embed::{EmbedRequest, Embedder};
 
 fn identity() -> ModelIdentity {
     ModelIdentity {
@@ -46,7 +48,9 @@ fn unit(
     start_line: usize,
 ) -> CodeUnitRef {
     CodeUnitRef {
-        id: 0,
+        entity_id: codeindex_core::EntityId::new(format!("{path}#{start_line}")),
+        entity_version_id: codeindex_core::EntityVersionId::new(format!("{path}#{start_line}")),
+        generation: 0,
         project_label: project.into(),
         relative_path: path.into(),
         language_id: "rust".into(),
@@ -60,6 +64,7 @@ fn unit(
         body_node_count: 20,
         normalized_body_hash: hash.into(),
         display_source: Some(format!("fn {name}() {{ /* fixture */ }}")),
+        representations: Vec::new(),
     }
 }
 
@@ -70,21 +75,18 @@ fn ctx(
 ) -> AnalysisContext {
     let projects = labels
         .iter()
-        .enumerate()
-        .map(|(i, label)| Project {
-            id: i as i64 + 1,
+        .map(|label| ProjectRecord {
             label: label.to_string(),
             source_dir: format!("/{label}"),
-            role: None,
+            last_index_run_id: None,
         })
         .collect();
-    AnalysisContext {
-        model_id: 1,
-        identity: identity(),
+    AnalysisContext::from_parts(
+        identity(),
         projects,
-        vectors: VectorStore::from_unit_vectors(4, vectors),
         units,
-    }
+        VectorStore::from_unit_vectors(4, vectors),
+    )
 }
 
 fn analysis_config() -> AnalysisConfig {
@@ -415,16 +417,16 @@ fn context_loads_projects_units_and_missing_embeddings() -> Result<()> {
     let ctx = AnalysisContext::load(&db, &[])?;
     assert_eq!(ctx.projects.len(), 2);
     assert_eq!(ctx.units.len(), 3);
-    assert_eq!(ctx.vectors.len(), 3);
+    assert_eq!(ctx.vectors().len(), 3);
 
     // A unit indexed after embedding has no vector: sparse ids tolerated.
     write("src-a", "late.rs", &big_fn("late", "acc"));
     decombine::index::indexer::index(&db, &config, None)?;
     let ctx = AnalysisContext::load(&db, &[])?;
     assert_eq!(ctx.units.len(), 4);
-    assert_eq!(ctx.vectors.len(), 3, "missing embedding leaves no row");
+    assert_eq!(ctx.vectors().len(), 3, "missing embedding leaves no row");
     let late = ctx.units.iter().position(|u| u.name == "late").unwrap();
-    assert!(ctx.vectors.row_for_unit(late).is_none());
+    assert!(ctx.vectors().row_for_unit(late).is_none());
 
     assert!(AnalysisContext::load(&db, &["nope".to_string()]).is_err());
     Ok(())
@@ -434,17 +436,31 @@ fn context_loads_projects_units_and_missing_embeddings() -> Result<()> {
 
 /// Embedder returning pre-baked vectors for query texts.
 struct FixtureEmbedder {
-    identity: ModelIdentity,
+    contract: ModelContract,
+    execution: ExecutionInfo,
+}
+
+impl FixtureEmbedder {
+    fn new(identity: ModelIdentity) -> Self {
+        FixtureEmbedder {
+            contract: identity.contract(),
+            execution: identity.execution(),
+        }
+    }
 }
 
 impl Embedder for FixtureEmbedder {
-    fn identity(&self) -> &ModelIdentity {
-        &self.identity
+    fn contract(&self) -> &ModelContract {
+        &self.contract
     }
-    fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(inputs
+    fn execution(&self) -> &ExecutionInfo {
+        &self.execution
+    }
+    fn embed(&mut self, request: &EmbedRequest<'_>) -> Result<Vec<Vec<f32>>> {
+        Ok(request
+            .inputs
             .iter()
-            .map(|text| match text.as_str() {
+            .map(|text| match *text {
                 "error handling and retries" => vec![1.0, 0.0, 0.0, 0.0],
                 "database access" => vec![0.0, 1.0, 0.0, 0.0],
                 other => panic!("unexpected query {other}"),
@@ -489,9 +505,7 @@ fn concern_projection_scoring_and_spread() {
             },
         ],
     };
-    let mut embedder = FixtureEmbedder {
-        identity: identity(),
-    };
+    let mut embedder = FixtureEmbedder::new(identity());
     let report = ConcernAnalyzer {
         embedder: &mut embedder,
     }
@@ -530,7 +544,7 @@ fn concern_analyzer_rejects_mismatched_model() {
     );
     let mut wrong = identity();
     wrong.model = "different".into();
-    let mut embedder = FixtureEmbedder { identity: wrong };
+    let mut embedder = FixtureEmbedder::new(wrong);
     let config: ConcernsConfig = serde_yaml::from_str("{}").unwrap();
     let error = ConcernAnalyzer {
         embedder: &mut embedder,

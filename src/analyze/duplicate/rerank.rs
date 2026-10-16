@@ -37,7 +37,9 @@ mod tests {
 
     fn unit(path: &str, start_line: usize, end_line: usize) -> CodeUnitRef {
         CodeUnitRef {
-            id: 0,
+            entity_id: codeindex_core::EntityId::new(format!("{path}#{start_line}")),
+            entity_version_id: codeindex_core::EntityVersionId::new(format!("{path}#{start_line}")),
+            generation: 0,
             project_label: "main".into(),
             relative_path: path.into(),
             language_id: "rust".into(),
@@ -51,6 +53,7 @@ mod tests {
             body_node_count: 10,
             normalized_body_hash: "h".into(),
             display_source: None,
+            representations: Vec::new(),
         }
     }
 

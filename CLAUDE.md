@@ -8,7 +8,8 @@ upstream Slopo (`_upstream/`, research-only, never copy code from it).
 Deeper docs: `architecture.md` (design), `PLAN.md` (phases), `EXPERIMENTS.md`
 (every experiment, append-only log), `TODO.md` (next work),
 `docs/benchmarks.md` (calibration baselines), `docs/query-interface.md`
-(`query` command family + analyzer `--json` reference, with examples).
+(`query` command family + analyzer `--json` reference, with examples),
+`docs/remote-embeddings.md` (OpenRouter backend, data policy, model survey).
 
 ## Build, test, verify
 
@@ -64,13 +65,16 @@ Deeper docs: `architecture.md` (design), `PLAN.md` (phases), `EXPERIMENTS.md`
   (`assets/languages/<id>.toml` + `<id>/units.scm`, adapters in
   `src/language.rs`). Embedding backend + packer: `../codeindex/crates/embedding`.
 - The loaded corpus and search operations live in **`codeindex-search`**
-  (`SearchIndex::{load, search_text, search_vector, similar_to_unit}`,
-  `resolve_selector`, `VectorStore`). decombine's `analyze/{context,vector_store}.rs`
-  re-export `SearchIndex as AnalysisContext`, `CodeUnitRef`, and `VectorStore`
-  from it (keeping only the decombine-specific `Analyzer` trait locally), and
-  `src/query/mod.rs`'s `search`/`similar` are presentation over
-  `SearchIndex::{search_text,similar_to_unit}` — embed + identity-verify + rank +
-  resolve all happen in the crate now.
+  (`SearchIndex::{from_snapshot, search_text, search_vector, similar_to_unit}`,
+  `resolve_selector`, `VectorStore`). codeindex stores many embedding
+  *spaces* (one per channel × model); decombine embeds and analyzes exactly
+  one, `default/implementation` (`analyze::context::DECOMBINE_SPACE`, the
+  implementation channel = the old body text keyed by normalized body hash),
+  via `embed_space_pending` — never codeindex's all-channels `embed_pending`.
+  `AnalysisContext` wraps a `SearchIndex` (Deref → `ctx.units`/`ctx.projects`)
+  and pins that space (`ctx.vectors()`, `ctx.space_id`, `ctx.identity`).
+  `db::ModelIdentity` is decombine's flattened contract + execution record for
+  reports; tests build contexts with `AnalysisContext::from_parts`.
 - `src/analyze/`: `duplicate/` (candidate pairs → rerank → distinct-body-
   bounded union-find → `ClusterKind` sectioning), `compare/`, `concerns/`.
 - `src/report/markdown.rs`: all report rendering; duplicate index is

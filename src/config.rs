@@ -41,8 +41,15 @@ pub enum ConfigError {
     UnknownLanguage(String),
     #[error("duplicate language id {0:?}")]
     DuplicateLanguage(String),
-    #[error("unsupported embedding backend {0:?} (supported: fastembed)")]
+    #[error("unsupported embedding backend {0:?} (supported: fastembed, openrouter)")]
     UnknownBackend(String),
+    #[error(
+        "`embedding.backend: {0}` sends code to a third party and needs an `embedding.remote` \
+         block with at least `dimensions` and `data_policy`"
+    )]
+    MissingRemote(String),
+    #[error("`embedding.remote.{0}` is invalid: {1}")]
+    BadRemote(&'static str, String),
     #[error("unknown embedding model {0:?} (supported: {1})")]
     UnknownModel(String, String),
     #[error("model {0:?} has no quantized variant; set `embedding.quantized: false`")]
@@ -61,6 +68,11 @@ pub enum ConfigError {
     BadMaxBodyChars(usize),
     #[error("`embedding.pending_page_size` must be between 1 and 100000, got {0}")]
     BadPendingPageSize(usize),
+    #[error(
+        "`embedding.memory_guard` needs pause_below_mb > 0 and resume_above_mb >= \
+         pause_below_mb, got pause {pause} / resume {resume}"
+    )]
+    BadMemoryGuard { pause: u64, resume: u64 },
     #[error("threshold `{name}` must be in ({min}, {max}], got {value}")]
     ThresholdRange {
         name: &'static str,
@@ -238,6 +250,41 @@ pub struct EmbeddingConfig {
     /// built-in catalog.
     #[serde(default)]
     pub custom: Option<CustomModelConfig>,
+    /// Settings for a remote backend (`backend: openrouter`), where `model`
+    /// is the provider's model id (e.g. `qwen/qwen3-embedding-8b`). Remote
+    /// backends are never the default: they send code off-machine.
+    #[serde(default)]
+    pub remote: Option<RemoteConfig>,
+    /// Pause embedding while available system memory is low: the model is
+    /// released between batches and reloaded once memory recovers, instead
+    /// of letting the OOM killer take the run. Off when unset.
+    #[serde(default)]
+    pub memory_guard: Option<MemoryGuardConfig>,
+}
+
+/// Thresholds in MiB of available system memory (Linux `MemAvailable`; a
+/// no-op on platforms where it cannot be read).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct MemoryGuardConfig {
+    /// Pause and release the model below this much available memory.
+    pub pause_below_mb: u64,
+    /// Resume once at least this much is available (default: 2x pause).
+    #[serde(default)]
+    pub resume_above_mb: Option<u64>,
+    /// When set, `embed` runs in a supervised child process and memory is
+    /// checked on this timer, killing the child mid-batch when it falls below
+    /// `pause_below_mb` (finished batches persist; the restart resumes). When
+    /// unset, memory is checked only between batches, which cannot stop a
+    /// batch already in flight.
+    #[serde(default)]
+    pub watch_interval_ms: Option<u64>,
+}
+
+impl MemoryGuardConfig {
+    pub fn resume_above_mb(&self) -> u64 {
+        self.resume_above_mb.unwrap_or(self.pause_below_mb * 2)
+    }
 }
 
 /// A locally exported ONNX embedding model (e.g. an `optimum` export of a
@@ -262,6 +309,68 @@ pub struct CustomModelConfig {
     pub max_length: usize,
 }
 
+/// What a remote provider may keep of the code it is sent. Required, with no
+/// default, so choosing a remote backend is also choosing retention terms.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DataPolicy {
+    /// Zero data retention endpoints only (use for private code).
+    Zdr,
+    /// No training on inputs; operational logging may still apply.
+    NoTraining,
+    /// Provider defaults, which may log or train. Public code only.
+    ProviderDefault,
+}
+
+/// A model served by a remote embedding API (OpenRouter today). The API key
+/// comes from the environment, never from the config.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RemoteConfig {
+    /// Required: what the provider may retain. See [`DataPolicy`].
+    pub data_policy: DataPolicy,
+    /// Output width the model returns (checked on every response).
+    pub dimensions: usize,
+    /// Ask the API to truncate to `dimensions` (Matryoshka models only).
+    #[serde(default)]
+    pub request_dimensions: bool,
+    /// Context length of the remote model; recorded in the identity.
+    #[serde(default = "default_remote_max_input_tokens")]
+    pub max_input_tokens: usize,
+    /// Upstream providers to route to, in order, with fallbacks disabled
+    /// (OpenRouter). Strongly recommended: unpinned routing can mix
+    /// upstreams' numerics within one database.
+    #[serde(default)]
+    pub providers: Vec<String>,
+    /// Accepted upstream quantizations (e.g. `[bf16]`).
+    #[serde(default)]
+    pub quantizations: Vec<String>,
+    #[serde(default)]
+    pub document_input_type: Option<String>,
+    #[serde(default)]
+    pub query_input_type: Option<String>,
+    #[serde(default)]
+    pub query_prefix: String,
+    #[serde(default)]
+    pub document_prefix: String,
+    /// Endpoint root; defaults to the provider's public API.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Defaults to the provider's conventional variable
+    /// (`OPENROUTER_API_KEY`).
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    #[serde(default = "default_remote_max_inputs_per_request")]
+    pub max_inputs_per_request: usize,
+    /// Concurrent requests per embed batch.
+    #[serde(default = "default_remote_concurrency")]
+    pub concurrency: usize,
+    #[serde(default = "default_remote_timeout_secs")]
+    pub timeout_secs: u64,
+    #[serde(default = "default_remote_max_retries")]
+    pub max_retries: u32,
+}
+
 impl Default for EmbeddingConfig {
     fn default() -> Self {
         serde_yaml::from_str("{}").expect("empty embedding config uses defaults")
@@ -271,6 +380,9 @@ impl Default for EmbeddingConfig {
 impl EmbeddingConfig {
     /// Output dimensions of the configured model.
     pub fn dimensions(&self) -> usize {
+        if codeindex_embedding::embed::remote::is_remote_backend(&self.backend) {
+            return self.remote.as_ref().map_or(0, |remote| remote.dimensions);
+        }
         if let Some(custom) = &self.custom {
             return custom.dimensions;
         }
@@ -564,6 +676,22 @@ fn default_min_projection() -> f64 {
 fn default_top_units_per_concern() -> usize {
     50
 }
+fn default_remote_max_input_tokens() -> usize {
+    8192
+}
+fn default_remote_max_inputs_per_request() -> usize {
+    64
+}
+fn default_remote_concurrency() -> usize {
+    4
+}
+fn default_remote_timeout_secs() -> u64 {
+    120
+}
+fn default_remote_max_retries() -> u32 {
+    6
+}
+
 fn default_custom_onnx_file() -> PathBuf {
     PathBuf::from("onnx/model.onnx")
 }
@@ -758,10 +886,63 @@ impl Config {
         Ok(())
     }
 
+    fn validate_remote(e: &EmbeddingConfig) -> Result<(), ConfigError> {
+        let remote = e
+            .remote
+            .as_ref()
+            .ok_or_else(|| ConfigError::MissingRemote(e.backend.clone()))?;
+        let bad = |field, message: &str| Err(ConfigError::BadRemote(field, message.into()));
+        if e.model.trim().is_empty() || !e.model.contains('/') {
+            return bad(
+                "model",
+                "set embedding.model to the provider's model id, e.g. `qwen/qwen3-embedding-8b`",
+            );
+        }
+        if e.custom.is_some() || e.quantized {
+            return bad(
+                "model",
+                "`custom` and `quantized` apply only to the fastembed backend",
+            );
+        }
+        if !(1..=16_384).contains(&remote.dimensions) {
+            return bad("dimensions", "must be between 1 and 16384");
+        }
+        if !(16..=1_000_000).contains(&remote.max_input_tokens) {
+            return bad("max_input_tokens", "must be between 16 and 1000000");
+        }
+        if !(1..=2048).contains(&remote.max_inputs_per_request) {
+            return bad("max_inputs_per_request", "must be between 1 and 2048");
+        }
+        if !(1..=64).contains(&remote.concurrency) {
+            return bad("concurrency", "must be between 1 and 64");
+        }
+        if remote.timeout_secs == 0 {
+            return bad("timeout_secs", "must be positive");
+        }
+        if let Some(url) = &remote.base_url
+            && !url.starts_with("https://")
+            && !url.starts_with("http://")
+        {
+            return bad("base_url", "must be an http(s) URL");
+        }
+        if remote
+            .api_key_env
+            .as_ref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return bad("api_key_env", "must name an environment variable");
+        }
+        Self::validate_embedding_limits(e)
+    }
+
     fn validate_embedding(&self) -> Result<(), ConfigError> {
         let e = &self.embedding;
-        if e.backend != "fastembed" {
-            return Err(ConfigError::UnknownBackend(e.backend.clone()));
+        match e.backend.as_str() {
+            "fastembed" => {}
+            backend if codeindex_embedding::embed::remote::is_remote_backend(backend) => {
+                return Self::validate_remote(e);
+            }
+            _ => return Err(ConfigError::UnknownBackend(e.backend.clone())),
         }
         if let Some(custom) = &e.custom {
             if !matches!(custom.pooling.as_str(), "mean" | "cls") {
@@ -804,6 +985,11 @@ impl Config {
                 EXECUTION_PROVIDERS.join(", "),
             ));
         }
+        Self::validate_embedding_limits(e)
+    }
+
+    /// Batching and guard limits shared by every backend.
+    fn validate_embedding_limits(e: &EmbeddingConfig) -> Result<(), ConfigError> {
         if e.batch_size == 0 || e.batch_size > 100_000 {
             return Err(ConfigError::BadBatchSize(e.batch_size));
         }
@@ -818,6 +1004,14 @@ impl Config {
         }
         if e.pending_page_size == 0 || e.pending_page_size > 100_000 {
             return Err(ConfigError::BadPendingPageSize(e.pending_page_size));
+        }
+        if let Some(guard) = &e.memory_guard
+            && (guard.pause_below_mb == 0 || guard.resume_above_mb() < guard.pause_below_mb)
+        {
+            return Err(ConfigError::BadMemoryGuard {
+                pause: guard.pause_below_mb,
+                resume: guard.resume_above_mb(),
+            });
         }
         Ok(())
     }
@@ -1013,6 +1207,14 @@ embedding:
   execution_provider: cpu
   # require: fail if the accelerator can't be used; auto: warn and use cpu.
   provider_mode: require
+  # Pause (releasing the model) while available system memory is below
+  # pause_below_mb, resuming at resume_above_mb (default 2x). Linux only.
+  # Checked between batches by default; set watch_interval_ms to also check on
+  # a timer and kill/restart the embed mid-batch (hard limit).
+  # memory_guard:
+  #   pause_below_mb: 4096
+  #   resume_above_mb: 8192
+  #   watch_interval_ms: 2000
   quantized: false
 
 index:
@@ -1101,6 +1303,28 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ConfigError::MissingSourceDir(_))
+        ));
+    }
+
+    #[test]
+    fn memory_guard_parses_and_validates() {
+        let dir = tempdir();
+        let mut config = base_config(dir.path());
+        config.embedding.memory_guard =
+            serde_yaml::from_str("pause_below_mb: 4096\nwatch_interval_ms: 2000").unwrap();
+        config.validate().unwrap();
+        let guard = config.embedding.memory_guard.unwrap();
+        assert_eq!(guard.resume_above_mb(), 8192);
+        assert_eq!(guard.watch_interval_ms, Some(2000));
+
+        config.embedding.memory_guard = Some(MemoryGuardConfig {
+            pause_below_mb: 4096,
+            resume_above_mb: Some(1024),
+            watch_interval_ms: None,
+        });
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::BadMemoryGuard { .. })
         ));
     }
 
@@ -1275,6 +1499,50 @@ mod tests {
         assert!(matches!(
             config.validate(),
             Err(ConfigError::BadBatchSize(0))
+        ));
+    }
+
+    #[test]
+    fn openrouter_backend_needs_remote_block_with_data_policy() {
+        let dir = tempdir();
+        let mut config = base_config(dir.path());
+        // Remote is never the default.
+        assert_eq!(config.embedding.backend, "fastembed");
+        config.embedding.backend = "openrouter".into();
+        config.embedding.model = "qwen/qwen3-embedding-8b".into();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MissingRemote(_))
+        ));
+
+        // `data_policy` has no default: omitting it is a parse error.
+        let missing: Result<RemoteConfig, _> = serde_yaml::from_str("{dimensions: 4096}");
+        let error = missing.unwrap_err().to_string();
+        assert!(error.contains("data_policy"), "{error}");
+
+        config.embedding.remote = Some(
+            serde_yaml::from_str("{data_policy: zdr, dimensions: 4096, providers: [deepinfra]}")
+                .unwrap(),
+        );
+        config.validate().unwrap();
+        assert_eq!(config.embedding.dimensions(), 4096);
+        let remote = config.embedding.remote.as_ref().unwrap();
+        assert_eq!(remote.data_policy, DataPolicy::Zdr);
+        assert_eq!(remote.api_key_env, None);
+        assert_eq!(remote.max_inputs_per_request, 64);
+
+        // A local catalog name is not a provider model id.
+        config.embedding.model = "CodeRankEmbed".into();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::BadRemote("model", _))
+        ));
+
+        config.embedding.model = "qwen/qwen3-embedding-8b".into();
+        config.embedding.remote.as_mut().unwrap().dimensions = 0;
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::BadRemote("dimensions", _))
         ));
     }
 

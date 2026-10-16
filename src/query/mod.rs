@@ -8,10 +8,13 @@ pub use codeindex_query::{unit_id, unit_line};
 use codeindex_search::resolve_selector;
 use serde_json::{Value, json};
 
-use crate::analyze::context::{AnalysisContext, CodeUnitRef, load_projects_and_units};
+use crate::analyze::context::{
+    AnalysisContext, CodeUnitRef, decombine_space_id, load_projects_and_units,
+};
 use crate::cli::{CapabilitiesArgs, InspectArgs, SearchArgs, SimilarArgs, UnitsArgs};
 use crate::config::Config;
-use crate::db::{Db, ModelIdentity, Project};
+use crate::db::{Db, ModelIdentity};
+use codeindex_search::storage::ProjectRecord;
 
 pub const QUERY_SCHEMA_VERSION: &str = "decombine.query.v1";
 pub const CAPABILITIES_SCHEMA_VERSION: &str = "decombine.capabilities.v1";
@@ -19,7 +22,7 @@ pub const CAPABILITIES_SCHEMA_VERSION: &str = "decombine.capabilities.v1";
 pub fn unit_json(unit: &CodeUnitRef) -> Value {
     json!({
         "unit_id": unit_id(unit),
-        "db_unit_id": unit.id,
+        "entity_version_id": unit.entity_version_id,
         "project": unit.project_label,
         "path": unit.relative_path,
         "language": unit.language_id,
@@ -80,7 +83,7 @@ fn resolve_unit(units: &[CodeUnitRef], selector: &str) -> Result<usize> {
     resolve_selector(units, selector)
 }
 
-fn unit_source(projects: &[Project], unit: &CodeUnitRef) -> Option<String> {
+fn unit_source(projects: &[ProjectRecord], unit: &CodeUnitRef) -> Option<String> {
     if let Some(source) = &unit.display_source {
         return Some(source.clone());
     }
@@ -113,18 +116,29 @@ pub fn capabilities(
     let languages: Vec<(String, i64)> = statement
         .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let models = db.list_models()?;
-    let model = models.first();
+    let space_id = decombine_space_id();
+    let model = match db.get_space(&space_id)? {
+        Some(space) => {
+            let execution = db.model_executions(space.model_id)?.pop();
+            Some(ModelIdentity::from_parts(
+                &space.identity,
+                execution.as_ref(),
+            ))
+        }
+        None => None,
+    };
     let embeddings = model
-        .map(|model| -> Result<(i64, i64)> {
+        .as_ref()
+        .map(|_| -> Result<(i64, i64)> {
             Ok((
-                db.count_embeddings(model.id)?,
-                db.count_unembedded_hashes(model.id)?,
+                db.count_embeddings(&space_id)?,
+                db.count_unembedded_hashes(&space_id)?,
             ))
         })
         .transpose()?;
     let display_source: bool = db.conn().query_row(
-        "SELECT EXISTS(SELECT 1 FROM code_units WHERE display_source IS NOT NULL)",
+        "SELECT EXISTS(SELECT 1 FROM representations WHERE kind = 'full_source' \
+         AND content IS NOT NULL)",
         [],
         |row| row.get(0),
     )?;
@@ -149,7 +163,7 @@ pub fn capabilities(
                 "language": language,
                 "units": units,
             })).collect::<Vec<_>>(),
-            "model": model.map(|model| model_json(&model.identity)),
+            "model": model.as_ref().map(model_json),
             "embeddings": embeddings.map(|(count, pending)| json!({
                 "count": count,
                 "pending_bodies": pending,
@@ -191,7 +205,7 @@ pub fn capabilities(
     match model {
         Some(model) => println!(
             "model: {} ({} dims, provider {})",
-            model.identity.model, model.identity.dimensions, model.identity.execution_provider
+            model.model, model.dimensions, model.execution_provider
         ),
         None => println!("model: none (run `decombine embed`)"),
     }
@@ -276,13 +290,14 @@ pub fn similar(db: &Db, args: &SimilarArgs, mode: &str) -> Result<()> {
     let ctx = AnalysisContext::load(db, &[])?;
     let query_index = resolve_unit(&ctx.units, &args.unit)?;
     ensure!(
-        ctx.vectors.row_for_unit(query_index).is_some(),
+        ctx.vectors().row_for_unit(query_index).is_some(),
         "{} has no stored embedding; run `decombine embed` first",
         args.unit
     );
     let filter = WhereFilter::parse(args.r#where.as_deref())?;
     let threshold = args.threshold.unwrap_or(-1.0);
-    let results = ctx.similar_to_unit(query_index, &filter, args.limit, threshold)?;
+    let results =
+        ctx.similar_to_unit(query_index, &ctx.space_id, &filter, args.limit, threshold)?;
     let matched = results.matched;
     let hits = &results.hits;
 
@@ -340,7 +355,14 @@ pub fn search(config: &Config, db: &Db, args: &SearchArgs) -> Result<()> {
     let ctx = AnalysisContext::load(db, &[])?;
     let mut embedder = crate::embed::embedder_from_config(config)?;
     let filter = WhereFilter::parse(args.r#where.as_deref())?;
-    let results = ctx.search_text(embedder.as_mut(), &args.text, &filter, args.limit)?;
+    let results = ctx.search_text(
+        embedder.as_mut(),
+        &args.text,
+        None,
+        &ctx.space_id,
+        &filter,
+        args.limit,
+    )?;
     let matched = results.matched;
     let hits = &results.hits;
 

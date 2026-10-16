@@ -250,7 +250,7 @@ impl CompareAnalyzer {
             progress("removing common embedding directions (abtt)");
             abtt_store(ctx, config.abtt_directions)
         });
-        let vectors: &VectorStore = transformed.as_ref().unwrap_or(&ctx.vectors);
+        let vectors: &VectorStore = transformed.as_ref().unwrap_or(ctx.vectors());
 
         // Under background calibration, scan left→right unpruned once and
         // reuse it: the top-1 anchor comes from this pass (no separate
@@ -588,12 +588,12 @@ impl CompareAnalyzer {
 /// iteration with deflation on the implicit covariance (no dense `d x d`
 /// matrix, no external linear-algebra dependency).
 fn abtt_store(ctx: &AnalysisContext, m: usize) -> VectorStore {
-    let d = ctx.vectors.dimensions();
+    let d = ctx.vectors().dimensions();
     let rows: Vec<(usize, &[f32])> = (0..ctx.units.len())
         .filter_map(|u| {
-            ctx.vectors
+            ctx.vectors()
                 .row_for_unit(u)
-                .map(|r| (u, ctx.vectors.vector(r)))
+                .map(|r| (u, ctx.vectors().vector(r)))
         })
         .collect();
     if rows.is_empty() || d == 0 {

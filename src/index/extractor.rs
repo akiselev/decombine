@@ -1,29 +1,18 @@
-use anyhow::Result;
+//! Re-export of the parser-neutral tree-sitter frontend. Extraction returns
+//! `ExtractedEntity` values (spans plus representation channels); the indexer
+//! persists them, so decombine no longer projects them into a legacy row.
 
-use crate::db::NewCodeUnit;
-pub use codeindex_tree_sitter::ExtractOptions;
-use codeindex_tree_sitter::{LanguageDef, extract_units as extract_entities};
-
-/// Compatibility adapter from the parser-neutral frontend IR into decombine's
-/// existing persistence row. The channel→column projection is shared with the
-/// reusable crates via `NewCodeUnit::from`; this adapter only keeps the
-/// legacy `extract_units` signature the analyzers were written against.
-pub fn extract_units(
-    def: &LanguageDef,
-    source: &str,
-    options: &ExtractOptions,
-) -> Result<Vec<NewCodeUnit>> {
-    extract_entities(def, source, options)
-        .map(|entities| entities.into_iter().map(NewCodeUnit::from).collect())
-}
+pub use codeindex_core::ExtractedEntity;
+pub use codeindex_tree_sitter::{ExtractOptions, extract_units};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::index::language::LanguageRegistry;
+    use codeindex_core::RepresentationKind;
 
     #[test]
-    fn compatibility_adapter_preserves_legacy_fields() {
+    fn extraction_exposes_implementation_channel() {
         let def = LanguageRegistry::global().get("rust").unwrap();
         let units = extract_units(
             def,
@@ -31,16 +20,15 @@ mod tests {
             &ExtractOptions {
                 body_node_count_threshold: 1,
                 max_body_chars: 10_000,
+                ..Default::default()
             },
         )
         .unwrap();
         assert_eq!(units.len(), 1);
-        assert_eq!(units[0].language_id, "rust");
         assert_eq!(units[0].name, "add");
         assert!(
             units[0]
-                .embedding_text
-                .as_deref()
+                .representation_text(&RepresentationKind::Implementation)
                 .unwrap()
                 .contains("a + b")
         );

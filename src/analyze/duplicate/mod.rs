@@ -98,7 +98,7 @@ impl Analyzer for DuplicateAnalyzer {
         // 1. Candidate pairs from a lower threshold so the distance boost
         //    can rescue far-apart near-misses before final filtering.
         let candidates = ctx
-            .vectors
+            .vectors()
             .similar_pairs(config.candidate_threshold as f32, config.block_size);
         let candidate_pairs = candidates.len();
 

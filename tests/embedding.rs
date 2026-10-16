@@ -1,10 +1,11 @@
 //! Embedding pipeline acceptance tests (Phase 5), using the deterministic
 //! hash backend so no model download is needed.
 
+use decombine::analyze::context::decombine_space_id;
 use decombine::config::Config;
 use decombine::db::{Db, open_or_create};
 use decombine::embed::hash::HashEmbedder;
-use decombine::embed::{Embedder, embed_pending, embed_pending_with_progress};
+use decombine::embed::{embed_pending, embed_pending_with_progress};
 use decombine::index::indexer;
 
 const FN_A: &str = "fn alpha(values: Vec<i64>) -> i64 {\n    let mut total = 0;\n    for value in values {\n        if value > 0 {\n            total += value;\n        }\n    }\n    total\n}\n";
@@ -136,10 +137,15 @@ fn report_retention_rederives_text_from_source() {
     indexer::index(&f.db, &f.config, None).unwrap();
 
     // No stored embedding text in report mode...
-    let project = f.db.get_project("main").unwrap().unwrap();
-    let file = f.db.get_file(project.id, "one.rs").unwrap().unwrap();
-    let units = f.db.list_units_for_file(file.id).unwrap();
-    assert!(units[0].embedding_text.is_none());
+    let stored: Option<String> =
+        f.db.conn()
+            .query_row(
+                "SELECT content FROM representations WHERE kind = 'implementation'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+    assert!(stored.is_none());
 
     // ...but embedding still works by re-reading the source file.
     let mut embedder = HashEmbedder::new(16);
@@ -147,11 +153,9 @@ fn report_retention_rederives_text_from_source() {
     assert_eq!(stats.embedded, 1);
     assert_eq!(stats.unresolved, 0);
 
-    let model = f.db.find_or_create_model(embedder.identity()).unwrap();
-    let vector =
-        f.db.get_embedding(model, &units[0].normalized_body_hash)
-            .unwrap()
-            .unwrap();
+    let embeddings = f.db.embeddings_for_space(&decombine_space_id()).unwrap();
+    assert_eq!(embeddings.len(), 1);
+    let vector = &embeddings[0].1;
     assert_eq!(vector.len(), 16);
     // Stored vectors are normalized.
     let norm: f32 = vector.iter().map(|v| v * v).sum::<f32>().sqrt();

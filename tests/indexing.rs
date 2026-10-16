@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use codeindex_core::EmbeddingSpaceIdentity;
+use decombine::analyze::context::{decombine_channel, decombine_space_id};
 use decombine::config::Config;
 use decombine::db::{Db, ModelIdentity, open_or_create};
 use decombine::index::indexer;
@@ -43,6 +45,14 @@ fn single_project() -> Fixture {
 
 fn root(fixture: &Fixture) -> &Path {
     fixture.config.source_dir.as_deref().unwrap()
+}
+
+fn file_at(db: &Db, project_id: i64, path: &str) -> decombine::db::FileRecord {
+    db.list_files(project_id)
+        .unwrap()
+        .into_iter()
+        .find(|file| file.relative_path == path)
+        .unwrap()
 }
 
 fn test_identity() -> ModelIdentity {
@@ -89,7 +99,7 @@ fn modified_file_replaces_units() {
     indexer::index(&f.db, &f.config, None).unwrap();
 
     let project = f.db.get_project("main").unwrap().unwrap();
-    let file = f.db.get_file(project.id, "a.rs").unwrap().unwrap();
+    let file = file_at(&f.db, project.id, "a.rs");
     let before = f.db.list_units_for_file(file.id).unwrap();
     assert_eq!(before.len(), 1);
     assert_eq!(before[0].name, "alpha");
@@ -113,22 +123,25 @@ fn deleted_file_removes_units_and_orphan_embeddings() {
     write(root(&f), "b.rs", BIG_FN_B);
     indexer::index(&f.db, &f.config, None).unwrap();
 
-    // Embed both units' hashes with a fake model.
-    let model = f.db.find_or_create_model(&test_identity()).unwrap();
-    let project = f.db.get_project("main").unwrap().unwrap();
-    for file in f.db.list_files(project.id).unwrap() {
-        for unit in f.db.list_units_for_file(file.id).unwrap() {
-            f.db.insert_embedding(model, &unit.normalized_body_hash, &[1.0, 0.0, 0.0, 0.0])
-                .unwrap();
-        }
+    // Embed both units' implementation hashes with a fake model.
+    let model =
+        f.db.find_or_create_space(&EmbeddingSpaceIdentity::new(
+            decombine_space_id(),
+            decombine_channel(),
+            test_identity().contract(),
+        ))
+        .unwrap();
+    for (hash, _) in f.db.unembedded_hashes_page(&model, None, 100).unwrap() {
+        f.db.insert_embedding(&model, &hash, &[1.0, 0.0, 0.0, 0.0])
+            .unwrap();
     }
-    assert_eq!(f.db.count_embeddings(model).unwrap(), 2);
+    assert_eq!(f.db.count_embeddings(&model).unwrap(), 2);
 
     std::fs::remove_file(root(&f).join("b.rs")).unwrap();
     let stats = indexer::index(&f.db, &f.config, None).unwrap();
     assert_eq!(stats[0].removed, 1);
     assert_eq!(f.db.count_units().unwrap(), 1);
-    assert_eq!(f.db.count_embeddings(model).unwrap(), 1);
+    assert_eq!(f.db.count_embeddings(&model).unwrap(), 1);
 }
 
 #[test]
@@ -196,14 +209,16 @@ fn retention_modes_control_stored_text() {
         ));
         write(root(&f), "a.rs", BIG_FN_A);
         indexer::index(&f.db, &f.config, None).unwrap();
-        let project = f.db.get_project("main").unwrap().unwrap();
-        let file = f.db.get_file(project.id, "a.rs").unwrap().unwrap();
-        let units = f.db.list_units_for_file(file.id).unwrap();
-        assert_eq!(
-            units[0].display_source.is_some(),
-            want_display,
-            "{retention}"
-        );
-        assert_eq!(units[0].embedding_text.is_some(), want_embed, "{retention}");
+        let stored = |kind: &str| -> bool {
+            f.db.conn()
+                .query_row(
+                    "SELECT content IS NOT NULL FROM representations WHERE kind = ?1",
+                    [kind],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(stored("full_source"), want_display, "{retention}");
+        assert_eq!(stored("implementation"), want_embed, "{retention}");
     }
 }

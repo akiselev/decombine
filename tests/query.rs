@@ -5,12 +5,13 @@
 
 use anyhow::Result;
 use assert_cmd::Command;
+use codeindex_search::storage::ProjectRecord;
 use decombine::analyze::compare::CompareAnalyzer;
 use decombine::analyze::duplicate::DuplicateAnalyzer;
 use decombine::analyze::vector_store::VectorStore;
 use decombine::analyze::{AnalysisContext, Analyzer, CodeUnitRef};
 use decombine::config::{AnalysisConfig, ComparisonConfig, RetentionMode};
-use decombine::db::{ModelIdentity, Project};
+use decombine::db::ModelIdentity;
 use decombine::query::unit_id;
 use decombine::report::markdown::ReportMeta;
 use serde_json::Value;
@@ -42,7 +43,9 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 
 fn unit(project: &str, path: &str, name: &str, hash: &str, start_line: usize) -> CodeUnitRef {
     CodeUnitRef {
-        id: 0,
+        entity_id: codeindex_core::EntityId::new(format!("{path}#{start_line}")),
+        entity_version_id: codeindex_core::EntityVersionId::new(format!("{path}#{start_line}")),
+        generation: 0,
         project_label: project.into(),
         relative_path: path.into(),
         language_id: "rust".into(),
@@ -56,6 +59,7 @@ fn unit(project: &str, path: &str, name: &str, hash: &str, start_line: usize) ->
         body_node_count: 20,
         normalized_body_hash: hash.into(),
         display_source: Some(format!("fn {name}() {{ /* fixture */ }}")),
+        representations: Vec::new(),
     }
 }
 
@@ -66,21 +70,18 @@ fn ctx(
 ) -> AnalysisContext {
     let projects = labels
         .iter()
-        .enumerate()
-        .map(|(i, label)| Project {
-            id: i as i64 + 1,
+        .map(|label| ProjectRecord {
             label: label.to_string(),
             source_dir: format!("/{label}"),
-            role: None,
+            last_index_run_id: None,
         })
         .collect();
-    AnalysisContext {
-        model_id: 1,
-        identity: identity(),
+    AnalysisContext::from_parts(
+        identity(),
         projects,
-        vectors: VectorStore::from_unit_vectors(4, vectors),
         units,
-    }
+        VectorStore::from_unit_vectors(4, vectors),
+    )
 }
 
 fn meta(projects: &[(&str, &str)]) -> ReportMeta {
@@ -256,18 +257,16 @@ fn indexed_fixture() -> tempfile::TempDir {
 fn embed_fixture(dir: &std::path::Path) -> Result<()> {
     let config = decombine::config::Config::load(&dir.join("decombine.yaml"))?;
     let db = decombine::db::open_or_create(&config.db_file)?;
-    let model = db.find_or_create_model(&identity())?;
-    let mut stmt = db
-        .conn()
-        .prepare("SELECT DISTINCT normalized_body_hash FROM code_units ORDER BY 1")?;
-    let hashes: Vec<String> = stmt
-        .query_map([], |row| row.get(0))?
-        .map(|row| row.unwrap())
-        .collect();
-    for (i, hash) in hashes.iter().enumerate() {
+    let model = db.find_or_create_space(&codeindex_core::EmbeddingSpaceIdentity::new(
+        decombine::analyze::context::decombine_space_id(),
+        decombine::analyze::context::decombine_channel(),
+        identity().contract(),
+    ))?;
+    let hashes = db.unembedded_hashes_page(&model, None, 100)?;
+    for (i, (hash, _)) in hashes.iter().enumerate() {
         let mut v = vec![0.05_f32; 4];
         v[i % 4] = 1.0;
-        db.insert_embedding(model, hash, &normalize(v))?;
+        db.insert_embedding(&model, hash, &normalize(v))?;
     }
     Ok(())
 }

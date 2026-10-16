@@ -42,6 +42,20 @@ fn run_doctor(config_path: &std::path::Path, args: &DoctorArgs) -> Result<()> {
         config.embedding.model,
         config.embedding.dimensions()
     );
+    if let Some(remote) = &config.embedding.remote {
+        println!(
+            "remote: code bodies are sent to {} (data_policy={}, providers={})",
+            config.embedding.backend,
+            serde_json::to_value(remote.data_policy)?
+                .as_str()
+                .unwrap_or_default(),
+            if remote.providers.is_empty() {
+                "auto".to_string()
+            } else {
+                remote.providers.join(",")
+            }
+        );
+    }
     println!(
         "runtime: ort {} (fastembed {})",
         option_env!("DECOMBINE_ORT_VERSION").unwrap_or("unknown"),
@@ -72,12 +86,15 @@ fn run_doctor(config_path: &std::path::Path, args: &DoctorArgs) -> Result<()> {
         config.validate()?;
         println!("smoke test: loading model with execution_provider={provider} ...");
         let mut embedder = decombine::embed::embedder_from_config(&config)?;
-        let vectors = embedder.embed(&["decombine execution provider smoke test".to_string()])?;
+        let vectors = embedder.embed(&decombine::embed::EmbedRequest::documents(
+            &["decombine execution provider smoke test"],
+            None,
+        ))?;
         let dims = vectors.first().map(|v| v.len()).unwrap_or(0);
         println!(
             "smoke test: ok — {} dims, provider in effect: {}",
             dims,
-            embedder.identity().execution_provider
+            embedder.execution().execution_provider
         );
     }
     Ok(())
@@ -283,6 +300,13 @@ fn run_compare(config: &Config, db: &Db, args: &CompareArgs) -> Result<()> {
 /// One-line token-length summary after an embed run; silent when nothing
 /// was embedded.
 fn print_embed_progress(progress: decombine::embed::EmbedProgress) {
+    if let Some(available) = progress.memory_paused_mib {
+        eprintln!(
+            "embed paused: {available} MiB available (embedding.memory_guard); model released \
+             until memory recovers"
+        );
+        return;
+    }
     eprintln!(
         "embedded {}/{} bodies (batch {}, size {}, unresolved {})",
         progress.embedded + progress.unresolved,
@@ -293,22 +317,19 @@ fn print_embed_progress(progress: decombine::embed::EmbedProgress) {
     );
 }
 
-type LoadedSide = (decombine::db::EmbeddingModelRecord, Vec<(String, Vec<f32>)>);
+type LoadedSide = (decombine::db::ModelIdentity, Vec<(String, Vec<f32>)>);
 
 /// Load the single embedding model of a database and its stored vectors.
 fn load_drift_side(path: &std::path::Path) -> Result<LoadedSide> {
     let db = decombine::db::open_or_create(path)?;
-    let model = match db.list_models()?.as_slice() {
-        [one] => one.clone(),
-        [] => bail!("{} has no embedding model", path.display()),
-        many => bail!(
-            "{} has {} embedding models; drift needs one embedding set per database",
-            path.display(),
-            many.len()
-        ),
-    };
-    let embeddings = db.all_embeddings(model.id)?;
-    Ok((model, embeddings))
+    let space_id = decombine::analyze::context::decombine_space_id();
+    let space = db
+        .get_space(&space_id)?
+        .with_context(|| format!("{} has no {space_id} embeddings", path.display()))?;
+    let execution = db.model_executions(space.model_id)?.pop();
+    let identity = decombine::db::ModelIdentity::from_parts(&space.identity, execution.as_ref());
+    let embeddings = db.embeddings_for_space(&space_id)?;
+    Ok((identity, embeddings))
 }
 
 fn run_drift(args: &DriftArgs) -> Result<()> {
@@ -316,12 +337,12 @@ fn run_drift(args: &DriftArgs) -> Result<()> {
     let (candidate_model, candidate_emb) = load_drift_side(&args.candidate)?;
     let baseline = DriftSide {
         label: "baseline",
-        identity: &baseline_model.identity,
+        identity: &baseline_model,
         embeddings: baseline_emb,
     };
     let candidate = DriftSide {
         label: "candidate",
-        identity: &candidate_model.identity,
+        identity: &candidate_model,
         embeddings: candidate_emb,
     };
     let report = compute_drift(&baseline, &candidate, args.top_k, args.sample)?;
@@ -483,6 +504,13 @@ fn main() -> Result<()> {
         }
         Command::Embed => {
             let config = Config::load(&cli.config)?;
+            if let Some((guard, interval)) = decombine::embed::supervision(&config) {
+                return decombine::embed::supervisor::supervise_embed(
+                    &cli.config,
+                    &guard,
+                    interval,
+                );
+            }
             let db = decombine::db::open_or_create(&config.db_file)?;
             let mut embedder = load_embedder_with_progress(&config)?;
             let stats = decombine::embed::embed_pending_with_progress(
@@ -496,6 +524,9 @@ fn main() -> Result<()> {
                 stats.embedded, stats.batches, stats.unresolved
             );
             print_token_stats(&stats.tokens);
+            if let Some(usage) = embedder.usage_summary() {
+                println!("{usage}");
+            }
             Ok(())
         }
         Command::Tokens => {
@@ -530,7 +561,7 @@ fn main() -> Result<()> {
                 let config = Config::load(&cli.config)?;
                 // Constructing the backend downloads the model into cache.
                 let embedder = load_embedder_with_progress(&config)?;
-                let identity = embedder.identity();
+                let identity = decombine::db::ModelIdentity::of_embedder(embedder.as_ref());
                 println!(
                     "model {} ready (dims={}, cache={})",
                     identity.model,
@@ -595,21 +626,31 @@ fn main() -> Result<()> {
                     project.total_units
                 ));
             }
-            let mut embedder = decombine::embed::embedder_from_config(&config)?;
-            let embed_stats = decombine::embed::embed_pending_with_progress(
-                &db,
-                embedder.as_mut(),
-                &config,
-                print_embed_progress,
-            )?;
-            info(format!(
-                "embedded {} new bodies in {} batches ({} unresolved)",
-                embed_stats.embedded, embed_stats.batches, embed_stats.unresolved
-            ));
-            if !args.json {
-                print_token_stats(&embed_stats.tokens);
+            if let Some((guard, interval)) = decombine::embed::supervision(&config) {
+                // The child prints its own summary on stdout; keep --json clean.
+                if args.json {
+                    bail!("`run --json` cannot supervise embedding; run `embed` first");
+                }
+                decombine::embed::supervisor::supervise_embed(&cli.config, &guard, interval)?;
+            } else {
+                let mut embedder = decombine::embed::embedder_from_config(&config)?;
+                let embed_stats = decombine::embed::embed_pending_with_progress(
+                    &db,
+                    embedder.as_mut(),
+                    &config,
+                    print_embed_progress,
+                )?;
+                info(format!(
+                    "embedded {} new bodies in {} batches ({} unresolved)",
+                    embed_stats.embedded, embed_stats.batches, embed_stats.unresolved
+                ));
+                if !args.json {
+                    print_token_stats(&embed_stats.tokens);
+                }
+                if let Some(usage) = embedder.usage_summary() {
+                    info(usage);
+                }
             }
-            drop(embedder);
             match args.analysis {
                 None | Some(AnalysisCommand::Duplicates) => {
                     analyze_duplicates(&config, &db, args)?;

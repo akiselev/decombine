@@ -4,14 +4,16 @@
 use std::path::Path;
 
 use anyhow::Result;
+use codeindex_search::storage::ProjectRecord;
 use decombine::analyze::compare::CompareAnalyzer;
 use decombine::analyze::concerns::ConcernAnalyzer;
 use decombine::analyze::duplicate::DuplicateAnalyzer;
 use decombine::analyze::vector_store::VectorStore;
 use decombine::analyze::{AnalysisContext, Analyzer, CodeUnitRef};
 use decombine::config::{AnalysisConfig, ConcernQuery, ConcernsConfig, RetentionMode};
-use decombine::db::{ModelIdentity, Project};
-use decombine::embed::Embedder;
+use decombine::db::ModelIdentity;
+use decombine::db::{ExecutionInfo, ModelContract};
+use decombine::embed::{EmbedRequest, Embedder};
 use decombine::report;
 
 fn identity() -> ModelIdentity {
@@ -41,7 +43,9 @@ fn normalize(mut v: Vec<f32>) -> Vec<f32> {
 
 fn unit(project: &str, path: &str, name: &str, scope: Option<&str>, hash: &str) -> CodeUnitRef {
     CodeUnitRef {
-        id: 0,
+        entity_id: codeindex_core::EntityId::new(format!("{path}#{name}")),
+        entity_version_id: codeindex_core::EntityVersionId::new(format!("{path}#{name}")),
+        generation: 0,
         project_label: project.into(),
         relative_path: path.into(),
         language_id: "rust".into(),
@@ -57,6 +61,7 @@ fn unit(project: &str, path: &str, name: &str, scope: Option<&str>, hash: &str) 
         display_source: Some(format!(
             "fn {name}(input: u32) -> u32 {{\n    let doubled = input * 2;\n    doubled + 1\n}}"
         )),
+        representations: Vec::new(),
     }
 }
 
@@ -65,22 +70,20 @@ fn ctx(
     vectors: Vec<Option<Vec<f32>>>,
     labels: &[&str],
 ) -> AnalysisContext {
-    AnalysisContext {
-        model_id: 1,
-        identity: identity(),
-        projects: labels
-            .iter()
-            .enumerate()
-            .map(|(i, label)| Project {
-                id: i as i64 + 1,
-                label: label.to_string(),
-                source_dir: format!("/repo/{label}"),
-                role: None,
-            })
-            .collect(),
-        vectors: VectorStore::from_unit_vectors(4, vectors),
+    let projects = labels
+        .iter()
+        .map(|label| ProjectRecord {
+            label: label.to_string(),
+            source_dir: format!("/repo/{label}"),
+            last_index_run_id: None,
+        })
+        .collect();
+    AnalysisContext::from_parts(
+        identity(),
+        projects,
         units,
-    }
+        VectorStore::from_unit_vectors(4, vectors),
+    )
 }
 
 fn meta(ctx: &AnalysisContext, retention: RetentionMode) -> report::ReportMeta {
@@ -279,14 +282,24 @@ fn retention_modes_control_report_source() -> Result<()> {
     Ok(())
 }
 
-struct FixtureEmbedder(ModelIdentity);
+struct FixtureEmbedder {
+    contract: ModelContract,
+    execution: ExecutionInfo,
+}
 
 impl Embedder for FixtureEmbedder {
-    fn identity(&self) -> &ModelIdentity {
-        &self.0
+    fn contract(&self) -> &ModelContract {
+        &self.contract
     }
-    fn embed(&mut self, inputs: &[String]) -> Result<Vec<Vec<f32>>> {
-        Ok(inputs.iter().map(|_| vec![1.0, 0.0, 0.0, 0.0]).collect())
+    fn execution(&self) -> &ExecutionInfo {
+        &self.execution
+    }
+    fn embed(&mut self, request: &EmbedRequest<'_>) -> Result<Vec<Vec<f32>>> {
+        Ok(request
+            .inputs
+            .iter()
+            .map(|_| vec![1.0, 0.0, 0.0, 0.0])
+            .collect())
     }
 }
 
@@ -308,7 +321,10 @@ fn concern_report_golden() -> Result<()> {
             query: "error handling and retries".into(),
         }],
     };
-    let mut embedder = FixtureEmbedder(identity());
+    let mut embedder = FixtureEmbedder {
+        contract: identity().contract(),
+        execution: identity().execution(),
+    };
     let output = ConcernAnalyzer {
         embedder: &mut embedder,
     }

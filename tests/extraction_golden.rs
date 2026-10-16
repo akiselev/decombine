@@ -20,6 +20,7 @@ fn snapshot(source_path: &Path) -> String {
         &ExtractOptions {
             body_node_count_threshold: 8,
             max_body_chars: 10_000,
+            ..Default::default()
         },
     )
     .unwrap();
@@ -29,11 +30,11 @@ fn snapshot(source_path: &Path) -> String {
         writeln!(
             out,
             "{kind} {name} scope={scope} lines={sl}-{el} nodes={nodes} hash={hash}",
-            kind = unit.kind,
+            kind = unit.kind.as_str(),
             name = unit.name,
             scope = unit.scope.as_deref().unwrap_or("-"),
-            sl = unit.start_line,
-            el = unit.end_line,
+            sl = unit.span.start_line,
+            el = unit.span.end_line,
             nodes = unit.body_node_count,
             hash = &unit.normalized_body_hash[..12],
         )

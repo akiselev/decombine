@@ -1,5 +1,18 @@
 # TODO
 
+## Remote embeddings (2026-10-16)
+
+- Evaluate OpenRouter candidates on the standing testbeds (altium first, then
+  the oss-eval ladder) against CodeRankEmbed: `voyageai/voyage-code-4`,
+  `qwen/qwen3-embedding-8b` (pinned deepinfra/nebius, not the fp8 upstream),
+  `mistralai/codestral-embed-2505`. Use public corpora with
+  `data_policy: provider_default` or `zdr`; record calibrated thresholds in
+  EXPERIMENTS.md. See `docs/remote-embeddings.md`.
+- Confirm which candidates actually have ZDR endpoints, and whether
+  `dimensions`/`input_type` reach the upstream (OpenRouter lists
+  `supported_parameters: []` for embedding models; `require_parameters` is
+  sent, but verify response widths).
+
 ## Codeindex crate extraction — review follow-ups (2026-07-11)
 
 Code review of the `agent/extract-code-index-core` branch (indexing stack split
